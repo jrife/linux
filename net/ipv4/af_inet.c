@@ -557,6 +557,7 @@ int inet_dgram_connect(struct socket *sock, struct sockaddr *uaddr,
 		       int addr_len, int flags)
 {
 	struct sock *sk = sock->sk;
+	struct sockaddr_storage tmp_addr;
 	const struct proto *prot;
 	int err;
 
@@ -569,15 +570,17 @@ int inet_dgram_connect(struct socket *sock, struct sockaddr *uaddr,
 	if (uaddr->sa_family == AF_UNSPEC)
 		return prot->disconnect(sk, flags);
 
+	memcpy(&tmp_addr, uaddr, addr_len);
+
 	if (BPF_CGROUP_PRE_CONNECT_ENABLED(sk)) {
-		err = prot->pre_connect(sk, uaddr, addr_len);
+		err = prot->pre_connect(sk, (struct sockaddr *)tmp_addr, addr_len);
 		if (err)
 			return err;
 	}
 
 	if (data_race(!inet_sk(sk)->inet_num) && inet_autobind(sk))
 		return -EAGAIN;
-	return prot->connect(sk, uaddr, addr_len);
+	return prot->connect(sk, (struct sockaddr *)tmp_addr, addr_len);
 }
 EXPORT_SYMBOL(inet_dgram_connect);
 
@@ -615,6 +618,7 @@ int __inet_stream_connect(struct socket *sock, struct sockaddr *uaddr,
 			  int addr_len, int flags, int is_sendmsg)
 {
 	struct sock *sk = sock->sk;
+	struct sockaddr_storage tmp_addr;
 	int err;
 	long timeo;
 
@@ -657,13 +661,15 @@ int __inet_stream_connect(struct socket *sock, struct sockaddr *uaddr,
 		if (sk->sk_state != TCP_CLOSE)
 			goto out;
 
+		memcpy(&tmp_addr, uaddr, addr_len);
+
 		if (BPF_CGROUP_PRE_CONNECT_ENABLED(sk)) {
-			err = sk->sk_prot->pre_connect(sk, uaddr, addr_len);
+			err = sk->sk_prot->pre_connect(sk, (struct sockaddr *)tmp_addr, addr_len);
 			if (err)
 				goto out;
 		}
 
-		err = sk->sk_prot->connect(sk, uaddr, addr_len);
+		err = sk->sk_prot->connect(sk, (struct sockaddr *)tmp_addr, addr_len);
 		if (err < 0)
 			goto out;
 
