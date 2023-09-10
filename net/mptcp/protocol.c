@@ -3604,6 +3604,7 @@ static int mptcp_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 {
 	struct mptcp_subflow_context *subflow;
 	struct mptcp_sock *msk = mptcp_sk(sk);
+	struct sockaddr_storage addr;
 	int err = -EINVAL;
 	struct sock *ssk;
 
@@ -3640,6 +3641,10 @@ static int mptcp_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 		goto out;
 
 	if (BPF_CGROUP_PRE_CONNECT_ENABLED(ssk)) {
+		/* pre_connect can change uaddr. */
+		memcpy(&addr, uaddr, addr_len);
+		uaddr = (struct sockaddr*)&addr;
+		
 		err = ssk->sk_prot->pre_connect(ssk, uaddr, addr_len);
 		if (err)
 			goto out;
