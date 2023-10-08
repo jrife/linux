@@ -46,6 +46,7 @@ main()
 	trap cleanup EXIT 2 3 6 15
 	setup
 	./test_sock_addr setup_done
+	./test_sock_addr_kern setup_done
 }
 
 BASENAME=$(basename $0 .sh)
