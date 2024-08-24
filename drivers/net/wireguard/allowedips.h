@@ -24,6 +24,7 @@ struct allowedips_node {
 		struct list_head peer_list;
 		struct rcu_head rcu;
 	};
+	u64 seq;
 };
 
 struct allowedips {
@@ -39,9 +40,11 @@ int wg_allowedips_insert_v4(struct allowedips *table, const struct in_addr *ip,
 int wg_allowedips_insert_v6(struct allowedips *table, const struct in6_addr *ip,
 			    u8 cidr, struct wg_peer *peer, struct mutex *lock);
 void wg_allowedips_remove_by_peer(struct allowedips *table,
-				  struct wg_peer *peer, struct mutex *lock);
+				  struct wg_peer *peer, struct mutex *lock,
+				  u64 lt_seq);
 /* The ip input pointer should be __aligned(__alignof(u64))) */
 int wg_allowedips_read_node(struct allowedips_node *node, u8 ip[16], u8 *cidr);
+u64 wg_allowedips_next_seq(struct allowedips *table);
 
 /* These return a strong reference to a peer: */
 struct wg_peer *wg_allowedips_lookup_dst(struct allowedips *table,

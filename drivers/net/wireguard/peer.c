@@ -82,7 +82,8 @@ static void peer_make_dead(struct wg_peer *peer)
 	/* Remove from configuration-time lookup structures. */
 	list_del_init(&peer->peer_list);
 	wg_allowedips_remove_by_peer(&peer->device->peer_allowedips, peer,
-				     &peer->device->device_update_lock);
+				     &peer->device->device_update_lock,
+				     wg_allowedips_next_seq(&peer->device->peer_allowedips));
 	wg_pubkey_hashtable_remove(peer->device->peer_hashtable, peer);
 
 	/* Mark as dead, so that we don't allow jumping contexts after. */

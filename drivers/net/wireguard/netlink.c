@@ -358,6 +358,7 @@ static int set_peer(struct wg_device *wg, struct nlattr **attrs)
 {
 	u8 *public_key = NULL, *preshared_key = NULL;
 	struct wg_peer *peer = NULL;
+	u64 min_seq = 0;
 	u32 flags = 0;
 	int ret;
 
@@ -447,9 +448,7 @@ static int set_peer(struct wg_device *wg, struct nlattr **attrs)
 		}
 	}
 
-	if (flags & WGPEER_F_REPLACE_ALLOWEDIPS)
-		wg_allowedips_remove_by_peer(&wg->peer_allowedips, peer,
-					     &wg->device_update_lock);
+	min_seq = wg_allowedips_next_seq(&wg->peer_allowedips);
 
 	if (attrs[WGPEER_A_ALLOWEDIPS]) {
 		struct nlattr *attr, *allowedip[WGALLOWEDIP_A_MAX + 1];
@@ -465,6 +464,10 @@ static int set_peer(struct wg_device *wg, struct nlattr **attrs)
 				goto out;
 		}
 	}
+
+	if (flags & WGPEER_F_REPLACE_ALLOWEDIPS)
+		wg_allowedips_remove_by_peer(&wg->peer_allowedips, peer,
+					     &wg->device_update_lock, min_seq);
 
 	if (attrs[WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL]) {
 		const u16 persistent_keepalive_interval = nla_get_u16(

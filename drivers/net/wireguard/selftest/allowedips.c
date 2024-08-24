@@ -396,7 +396,8 @@ static __init bool randomized_test(void)
 		if (j >= NUM_PEERS)
 			break;
 		mutex_lock(&mutex);
-		wg_allowedips_remove_by_peer(&t, peers[j], &mutex);
+		wg_allowedips_remove_by_peer(&t, peers[j], &mutex,
+					     wg_allowedips_next_seq(&t));
 		mutex_unlock(&mutex);
 		horrible_allowedips_remove_by_value(&h, peers[j]);
 	}
@@ -500,6 +501,7 @@ bool __init wg_allowedips_selftest(void)
 	struct in6_addr ip;
 	size_t i = 0, count = 0;
 	__be64 part;
+	u64 seq;
 
 	mutex_init(&mutex);
 	mutex_lock(&mutex);
@@ -579,9 +581,27 @@ bool __init wg_allowedips_selftest(void)
 	insert(4, a, 128, 0, 0, 0, 32);
 	insert(4, a, 192, 0, 0, 0, 32);
 	insert(4, a, 255, 0, 0, 0, 32);
-	wg_allowedips_remove_by_peer(&t, a, &mutex);
+	wg_allowedips_remove_by_peer(&t, a, &mutex, wg_allowedips_next_seq(&t));
 	test_negative(4, a, 1, 0, 0, 0);
 	test_negative(4, a, 64, 0, 0, 0);
+	test_negative(4, a, 128, 0, 0, 0);
+	test_negative(4, a, 192, 0, 0, 0);
+	test_negative(4, a, 255, 0, 0, 0);
+
+	insert(4, a, 1, 0, 0, 0, 32);
+	insert(4, a, 64, 0, 0, 0, 32);
+	insert(4, a, 128, 0, 0, 0, 32);
+	seq = wg_allowedips_next_seq(&t);
+	insert(4, a, 128, 0, 0, 0, 32);
+	insert(4, a, 192, 0, 0, 0, 32);
+	insert(4, a, 255, 0, 0, 0, 32);
+	wg_allowedips_remove_by_peer(&t, a, &mutex, seq);
+	test_negative(4, a, 1, 0, 0, 0);
+	test_negative(4, a, 64, 0, 0, 0);
+	test(4, a, 128, 0, 0, 0);
+	test(4, a, 192, 0, 0, 0);
+	test(4, a, 255, 0, 0, 0);
+	wg_allowedips_remove_by_peer(&t, a, &mutex, wg_allowedips_next_seq(&t));
 	test_negative(4, a, 128, 0, 0, 0);
 	test_negative(4, a, 192, 0, 0, 0);
 	test_negative(4, a, 255, 0, 0, 0);
@@ -590,7 +610,7 @@ bool __init wg_allowedips_selftest(void)
 	wg_allowedips_init(&t);
 	insert(4, a, 192, 168, 0, 0, 16);
 	insert(4, a, 192, 168, 0, 0, 24);
-	wg_allowedips_remove_by_peer(&t, a, &mutex);
+	wg_allowedips_remove_by_peer(&t, a, &mutex, wg_allowedips_next_seq(&t));
 	test_negative(4, a, 192, 168, 0, 1);
 
 	/* These will hit the WARN_ON(len >= MAX_ALLOWEDIPS_DEPTH) in free_node
