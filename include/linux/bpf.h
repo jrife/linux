@@ -1627,6 +1627,7 @@ struct bpf_link_ops {
 	 * RCU GP and then "classic" RCU GP
 	 */
 	void (*dealloc_deferred)(struct bpf_link *link);
+	bool (*attachment_is_sleepable)(struct bpf_link *link);
 	int (*detach)(struct bpf_link *link);
 	int (*update_prog)(struct bpf_link *link, struct bpf_prog *new_prog,
 			   struct bpf_prog *old_prog);

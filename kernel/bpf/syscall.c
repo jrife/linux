@@ -2992,18 +2992,31 @@ static void bpf_link_defer_dealloc_mult_rcu_gp(struct rcu_head *rcu)
 		call_rcu(rcu, bpf_link_defer_dealloc_rcu_gp);
 }
 
+static void bpf_link_defer_bpf_prog_put(struct rcu_head *rcu)
+{
+	struct bpf_prog_aux *aux = container_of(rcu, struct bpf_prog_aux, rcu);
+	bpf_prog_put(aux->prog);
+
+}
+
 /* bpf_link_free is guaranteed to be called from process context */
 static void bpf_link_free(struct bpf_link *link)
 {
 	const struct bpf_link_ops *ops = link->ops;
 	bool sleepable = false;
 
+	if (ops->attachment_is_sleepable)
+		sleepable = ops->attachment_is_sleepable(link);
+
 	bpf_link_free_id(link->id);
 	if (link->prog) {
-		sleepable = link->prog->sleepable;
+		sleepable = sleepable || link->prog->sleepable;
 		/* detach BPF program, clean up used resources */
 		ops->release(link);
-		bpf_prog_put(link->prog);
+		if (sleepable)
+			call_rcu_tasks_trace(&link->prog->aux->rcu, bpf_link_defer_bpf_prog_put);
+		else
+			bpf_prog_put(link->prog);
 	}
 	if (ops->dealloc_deferred) {
 		/* schedule BPF link deallocation; if underlying BPF program
@@ -3485,6 +3498,14 @@ static void bpf_raw_tp_link_dealloc(struct bpf_link *link)
 	kfree(raw_tp);
 }
 
+static bool bpf_raw_tp_link_attachment_is_sleepable(struct bpf_link *link)
+{
+	struct bpf_raw_tp_link *raw_tp =
+		container_of(link, struct bpf_raw_tp_link, link);
+
+	return raw_tp->btp->tp->sleepable;
+}
+
 static void bpf_raw_tp_link_show_fdinfo(const struct bpf_link *link,
 					struct seq_file *seq)
 {
@@ -3539,6 +3560,7 @@ static int bpf_raw_tp_link_fill_link_info(const struct bpf_link *link,
 static const struct bpf_link_ops bpf_raw_tp_link_lops = {
 	.release = bpf_raw_tp_link_release,
 	.dealloc_deferred = bpf_raw_tp_link_dealloc,
+	.attachment_is_sleepable = bpf_raw_tp_link_attachment_is_sleepable,
 	.show_fdinfo = bpf_raw_tp_link_show_fdinfo,
 	.fill_link_info = bpf_raw_tp_link_fill_link_info,
 };
