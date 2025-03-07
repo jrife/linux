@@ -107,15 +107,30 @@ static void bpf_mprog_tuple_put(struct bpf_tuple *tuple)
  */
 static int bpf_mprog_replace(struct bpf_mprog_entry *entry,
 			     struct bpf_mprog_entry **entry_new,
-			     struct bpf_tuple *ntuple, int idx)
+			     struct bpf_tuple *ntuple, int idx,
+			     void *priv, priv_cmp_t priv_cmp,
+			     void **priv_old)
 {
+	struct bpf_mprog_entry *peer;
 	struct bpf_mprog_fp *fp;
 	struct bpf_mprog_cp *cp;
 	struct bpf_prog *oprog;
+	bool upriv = false;
 
 	bpf_mprog_read(entry, idx, &fp, &cp);
+	if (priv_cmp)
+		upriv = priv_cmp(fp->priv, priv);
+
+	if (upriv) {
+		peer = bpf_mprog_peer(entry);
+		bpf_mprog_entry_copy(peer, entry);
+		bpf_mprog_read(peer, idx, &fp, &cp);
+		entry = peer;
+		*priv_old = fp->priv;
+	}
+
 	oprog = READ_ONCE(fp->prog);
-	bpf_mprog_write(fp, cp, ntuple);
+	bpf_mprog_write(fp, cp, ntuple, upriv, priv);
 	if (!ntuple->link) {
 		WARN_ON_ONCE(cp->link);
 		bpf_prog_put(oprog);
@@ -126,7 +141,8 @@ static int bpf_mprog_replace(struct bpf_mprog_entry *entry,
 
 static int bpf_mprog_insert(struct bpf_mprog_entry *entry,
 			    struct bpf_mprog_entry **entry_new,
-			    struct bpf_tuple *ntuple, int idx, u32 flags)
+			    struct bpf_tuple *ntuple, int idx, u32 flags,
+			    void *priv)
 {
 	int total = bpf_mprog_total(entry);
 	struct bpf_mprog_entry *peer;
@@ -142,7 +158,7 @@ static int bpf_mprog_insert(struct bpf_mprog_entry *entry,
 	bpf_mprog_entry_grow(peer, idx);
 insert:
 	bpf_mprog_read(peer, idx, &fp, &cp);
-	bpf_mprog_write(fp, cp, ntuple);
+	bpf_mprog_write(fp, cp, ntuple, true, priv);
 	bpf_mprog_inc(peer);
 	*entry_new = peer;
 	return 0;
@@ -150,10 +166,12 @@ insert:
 
 static int bpf_mprog_delete(struct bpf_mprog_entry *entry,
 			    struct bpf_mprog_entry **entry_new,
-			    struct bpf_tuple *dtuple, int idx)
+			    struct bpf_tuple *dtuple, int idx, void **priv)
 {
 	int total = bpf_mprog_total(entry);
 	struct bpf_mprog_entry *peer;
+	struct bpf_mprog_fp *fp;
+	struct bpf_mprog_cp *cp;
 
 	peer = bpf_mprog_peer(entry);
 	bpf_mprog_entry_copy(peer, entry);
@@ -161,6 +179,10 @@ static int bpf_mprog_delete(struct bpf_mprog_entry *entry,
 		idx = 0;
 	else if (idx == total)
 		idx = total - 1;
+	if (priv) {
+		bpf_mprog_read(peer, idx, &fp, &cp);
+		*priv = fp->priv;
+	}
 	bpf_mprog_entry_shrink(peer, idx);
 	bpf_mprog_dec(peer);
 	bpf_mprog_mark_for_release(peer, dtuple);
@@ -222,11 +244,13 @@ static int bpf_mprog_pos_after(struct bpf_mprog_entry *entry,
 	return tuple->prog ? -ENOENT : bpf_mprog_total(entry);
 }
 
-int bpf_mprog_attach(struct bpf_mprog_entry *entry,
-		     struct bpf_mprog_entry **entry_new,
-		     struct bpf_prog *prog_new, struct bpf_link *link,
-		     struct bpf_prog *prog_old,
-		     u32 flags, u32 id_or_fd, u64 revision)
+int _bpf_mprog_attach(struct bpf_mprog_entry *entry,
+		      struct bpf_mprog_entry **entry_new,
+		      struct bpf_prog *prog_new, struct bpf_link *link,
+		      struct bpf_prog *prog_old,
+		      void *priv_new, priv_cmp_t priv_cmp,
+		      void **priv_old,
+		      u32 flags, u32 id_or_fd, u64 revision)
 {
 	struct bpf_tuple rtuple, ntuple = {
 		.prog = prog_new,
@@ -286,12 +310,24 @@ int bpf_mprog_attach(struct bpf_mprog_entry *entry,
 		goto out;
 	}
 	if (flags & BPF_F_REPLACE)
-		ret = bpf_mprog_replace(entry, entry_new, &ntuple, idx);
+		ret = bpf_mprog_replace(entry, entry_new, &ntuple, idx,
+					priv_new, priv_cmp, priv_old);
 	else
-		ret = bpf_mprog_insert(entry, entry_new, &ntuple, idx, flags);
+		ret = bpf_mprog_insert(entry, entry_new, &ntuple, idx, flags,
+				       priv_new);
 out:
 	bpf_mprog_tuple_put(&rtuple);
 	return ret;
+}
+
+int bpf_mprog_attach(struct bpf_mprog_entry *entry,
+		     struct bpf_mprog_entry **entry_new,
+		     struct bpf_prog *prog_new, struct bpf_link *link,
+		     struct bpf_prog *prog_old,
+		     u32 flags, u32 id_or_fd, u64 revision)
+{
+	return _bpf_mprog_attach(entry, entry_new, prog_new, link, prog_old,
+				 NULL, NULL, NULL, flags, id_or_fd, revision);
 }
 
 static int bpf_mprog_fetch(struct bpf_mprog_entry *entry,
@@ -325,10 +361,10 @@ static int bpf_mprog_fetch(struct bpf_mprog_entry *entry,
 	return 0;
 }
 
-int bpf_mprog_detach(struct bpf_mprog_entry *entry,
-		     struct bpf_mprog_entry **entry_new,
-		     struct bpf_prog *prog, struct bpf_link *link,
-		     u32 flags, u32 id_or_fd, u64 revision)
+int _bpf_mprog_detach(struct bpf_mprog_entry *entry,
+		      struct bpf_mprog_entry **entry_new,
+		      struct bpf_prog *prog, struct bpf_link *link,
+		      u32 flags, u32 id_or_fd, u64 revision, void **priv)
 {
 	struct bpf_tuple rtuple, dtuple = {
 		.prog = prog,
@@ -386,10 +422,20 @@ int bpf_mprog_detach(struct bpf_mprog_entry *entry,
 	ret = bpf_mprog_fetch(entry, &dtuple, idx);
 	if (ret)
 		goto out;
-	ret = bpf_mprog_delete(entry, entry_new, &dtuple, idx);
+	ret = bpf_mprog_delete(entry, entry_new, &dtuple, idx, priv);
 out:
 	bpf_mprog_tuple_put(&rtuple);
 	return ret;
+}
+
+
+int bpf_mprog_detach(struct bpf_mprog_entry *entry,
+		     struct bpf_mprog_entry **entry_new,
+		     struct bpf_prog *prog, struct bpf_link *link,
+		     u32 flags, u32 id_or_fd, u64 revision)
+{
+	return _bpf_mprog_detach(entry, entry_new, prog, link, flags, id_or_fd,
+				 revision, NULL);
 }
 
 int bpf_mprog_query(const union bpf_attr *attr, union bpf_attr __user *uattr,

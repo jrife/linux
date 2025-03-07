@@ -1612,6 +1612,8 @@ union bpf_attr {
 			__u32	relative_id;
 		};
 		__u64		expected_revision;
+		__u32		filter_action;
+		__u32		filter_mask;
 	};
 
 	struct { /* anonymous struct used by BPF_PROG_TEST_RUN command */
@@ -1772,6 +1774,8 @@ union bpf_attr {
 					__u32	relative_id;
 				};
 				__u64		expected_revision;
+				__u32		filter_action;
+				__u32		filter_mask;
 			} tcx;
 			struct {
 				__aligned_u64	path;
@@ -1788,6 +1792,8 @@ union bpf_attr {
 					__u32	relative_id;
 				};
 				__u64		expected_revision;
+				__u32		filter_action;
+				__u32		filter_mask;
 			} netkit;
 		};
 	} link_create;
@@ -6432,6 +6438,17 @@ enum tcx_action_base {
 	TCX_PASS	= 0,
 	TCX_DROP	= 2,
 	TCX_REDIRECT	= 7,
+};
+
+enum {
+	TCX_FILTER_MATCH_PASS     = (1 << 0),
+	TCX_FILTER_MATCH_DROP     = (1 << 1),
+	TCX_FILTER_MATCH_REDIRECT = (1 << 2),
+};
+
+enum tcx_filter_action {
+	TCX_FILTER_ACT_IGNORE = 0,
+	TCX_FILTER_ACT_DEFER,
 };
 
 struct bpf_xdp_sock {

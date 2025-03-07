@@ -4258,13 +4258,20 @@ tcx_run(const struct bpf_mprog_entry *entry, struct sk_buff *skb,
 {
 	const struct bpf_mprog_fp *fp;
 	const struct bpf_prog *prog;
+	struct tcx_filter *filter;
 	int ret = TCX_NEXT;
+	int prev_ret;
 
 	if (needs_mac)
 		__skb_push(skb, skb->mac_len);
-	bpf_mprog_foreach_prog(entry, fp, prog) {
+	bpf_mprog_foreach_prog(entry, fp, prog, filter) {
 		bpf_compute_data_pointers(skb);
-		ret = bpf_prog_run(prog, skb);
+		prev_ret = bpf_prog_run(prog, skb);
+		if (filter && tcx_filter_match(prev_ret, filter->mask)) {
+			ret = filter->act == TCX_FILTER_ACT_IGNORE ? ret : prev_ret;
+			continue;
+		}
+		ret = prev_ret;
 		if (ret != TCX_NEXT)
 			break;
 	}

@@ -23,6 +23,42 @@ struct tcx_link {
 	u32 location;
 };
 
+struct tcx_filter {
+	enum tcx_filter_action act;
+	u32 mask;
+};
+
+static __always_inline bool
+tcx_filter_match(int ret, u32 mask)
+{
+	switch (ret) {
+	case TCX_PASS:
+		mask &= TCX_FILTER_MATCH_PASS;
+		break;
+	case TCX_DROP:
+		mask &= TCX_FILTER_MATCH_DROP;
+		break;
+	case TCX_REDIRECT:
+		mask &= TCX_FILTER_MATCH_REDIRECT;
+		break;
+	default:
+		mask = 0;
+	}
+
+	return !!mask;
+}
+
+static bool __maybe_unused tcx_filter_equals(void *o, void *n)
+{
+	struct tcx_filter *old = (struct tcx_filter *)o;
+	struct tcx_filter *new = (struct tcx_filter *)n;
+
+	if (old == NULL || new == NULL)
+		return old == new;
+
+	return old->act == new->act && old->mask == new->mask;
+}
+
 static inline void tcx_set_ingress(struct sk_buff *skb, bool ingress)
 {
 #ifdef CONFIG_NET_XGRESS

@@ -12773,12 +12773,16 @@ bpf_program__attach_tcx(const struct bpf_program *prog, int ifindex,
 			const struct bpf_tcx_opts *opts)
 {
 	LIBBPF_OPTS(bpf_link_create_opts, link_create_opts);
+	__u32 filter_action;
+	__u32 filter_mask;
 	__u32 relative_id;
 	int relative_fd;
 
 	if (!OPTS_VALID(opts, bpf_tcx_opts))
 		return libbpf_err_ptr(-EINVAL);
 
+	filter_action = OPTS_GET(opts, filter_action, 0);
+	filter_mask = OPTS_GET(opts, filter_mask, 0);
 	relative_id = OPTS_GET(opts, relative_id, 0);
 	relative_fd = OPTS_GET(opts, relative_fd, 0);
 
@@ -12797,6 +12801,8 @@ bpf_program__attach_tcx(const struct bpf_program *prog, int ifindex,
 	link_create_opts.tcx.expected_revision = OPTS_GET(opts, expected_revision, 0);
 	link_create_opts.tcx.relative_fd = relative_fd;
 	link_create_opts.tcx.relative_id = relative_id;
+	link_create_opts.tcx.filter_action = filter_action;
+	link_create_opts.tcx.filter_mask = filter_mask;
 	link_create_opts.flags = OPTS_GET(opts, flags, 0);
 
 	/* target_fd/target_ifindex use the same field in LINK_CREATE */
@@ -12808,12 +12814,16 @@ bpf_program__attach_netkit(const struct bpf_program *prog, int ifindex,
 			   const struct bpf_netkit_opts *opts)
 {
 	LIBBPF_OPTS(bpf_link_create_opts, link_create_opts);
+	__u32 filter_action;
+	__u32 filter_mask;
 	__u32 relative_id;
 	int relative_fd;
 
 	if (!OPTS_VALID(opts, bpf_netkit_opts))
 		return libbpf_err_ptr(-EINVAL);
 
+	filter_action = OPTS_GET(opts, filter_action, 0);
+	filter_mask = OPTS_GET(opts, filter_mask, 0);
 	relative_id = OPTS_GET(opts, relative_id, 0);
 	relative_fd = OPTS_GET(opts, relative_fd, 0);
 
@@ -12832,6 +12842,8 @@ bpf_program__attach_netkit(const struct bpf_program *prog, int ifindex,
 	link_create_opts.netkit.expected_revision = OPTS_GET(opts, expected_revision, 0);
 	link_create_opts.netkit.relative_fd = relative_fd;
 	link_create_opts.netkit.relative_id = relative_id;
+	link_create_opts.netkit.filter_action = filter_action;
+	link_create_opts.netkit.filter_mask = filter_mask;
 	link_create_opts.flags = OPTS_GET(opts, flags, 0);
 
 	return bpf_program_attach_fd(prog, ifindex, "netkit", &link_create_opts);

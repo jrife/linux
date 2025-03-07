@@ -41,10 +41,17 @@ netkit_run(const struct bpf_mprog_entry *entry, struct sk_buff *skb,
 {
 	const struct bpf_mprog_fp *fp;
 	const struct bpf_prog *prog;
+	struct tcx_filter *filter;
+	int prev_ret;
 
-	bpf_mprog_foreach_prog(entry, fp, prog) {
+	bpf_mprog_foreach_prog(entry, fp, prog, filter) {
 		bpf_compute_data_pointers(skb);
-		ret = bpf_prog_run(prog, skb);
+		prev_ret = bpf_prog_run(prog, skb);
+		if (filter && tcx_filter_match(prev_ret, filter->mask)) {
+			ret = filter->act == TCX_FILTER_ACT_IGNORE ? ret : prev_ret;
+			continue;
+		}
+		ret = prev_ret;
 		if (ret != NETKIT_NEXT)
 			break;
 	}
@@ -530,6 +537,8 @@ int netkit_prog_attach(const union bpf_attr *attr, struct bpf_prog *prog)
 {
 	struct bpf_mprog_entry *entry, *entry_new;
 	struct bpf_prog *replace_prog = NULL;
+	struct tcx_filter *filter = NULL;
+	void *filter_old = NULL;
 	struct net_device *dev;
 	int ret;
 
@@ -550,15 +559,29 @@ int netkit_prog_attach(const union bpf_attr *attr, struct bpf_prog *prog)
 			goto out;
 		}
 	}
-	ret = bpf_mprog_attach(entry, &entry_new, prog, NULL, replace_prog,
-			       attr->attach_flags, attr->relative_fd,
-			       attr->expected_revision);
+	if (attr->filter_mask) {
+		filter = kzalloc(sizeof(*filter), GFP_KERNEL);
+		if (!filter) {
+			ret = -ENOMEM;
+			goto out;
+		}
+		// TODO: needs validation logic
+		filter->act = attr->filter_action;
+		filter->mask = attr->filter_mask;
+	}
+	ret = _bpf_mprog_attach(entry, &entry_new, prog, NULL, replace_prog,
+				filter, tcx_filter_equals, &filter_old,
+				attr->attach_flags, attr->relative_fd,
+				attr->expected_revision);
 	if (!ret) {
 		if (entry != entry_new) {
 			netkit_entry_update(dev, entry_new);
 			netkit_entry_sync();
 		}
+		kfree(filter_old);
 		bpf_mprog_commit(entry);
+	} else {
+		kfree(filter);
 	}
 out:
 	if (replace_prog)
@@ -571,6 +594,7 @@ int netkit_prog_detach(const union bpf_attr *attr, struct bpf_prog *prog)
 {
 	struct bpf_mprog_entry *entry, *entry_new;
 	struct net_device *dev;
+	void *filter = NULL;
 	int ret;
 
 	rtnl_lock();
@@ -585,14 +609,16 @@ int netkit_prog_detach(const union bpf_attr *attr, struct bpf_prog *prog)
 		ret = -ENOENT;
 		goto out;
 	}
-	ret = bpf_mprog_detach(entry, &entry_new, prog, NULL, attr->attach_flags,
-			       attr->relative_fd, attr->expected_revision);
+	ret = _bpf_mprog_detach(entry, &entry_new, prog, NULL,
+				attr->attach_flags, attr->relative_fd,
+				attr->expected_revision, &filter);
 	if (!ret) {
 		if (!bpf_mprog_total(entry_new))
 			entry_new = NULL;
 		netkit_entry_update(dev, entry_new);
 		netkit_entry_sync();
 		bpf_mprog_commit(entry);
+		kfree(filter);
 	}
 out:
 	rtnl_unlock();
@@ -624,7 +650,9 @@ static struct netkit_link *netkit_link(const struct bpf_link *link)
 }
 
 static int netkit_link_prog_attach(struct bpf_link *link, u32 flags,
-				   u32 id_or_fd, u64 revision)
+				   u32 id_or_fd, u64 revision,
+				   struct tcx_filter *filter,
+				   void **filter_old)
 {
 	struct netkit_link *nkl = netkit_link(link);
 	struct bpf_mprog_entry *entry, *entry_new;
@@ -633,8 +661,9 @@ static int netkit_link_prog_attach(struct bpf_link *link, u32 flags,
 
 	ASSERT_RTNL();
 	entry = netkit_entry_fetch(dev, true);
-	ret = bpf_mprog_attach(entry, &entry_new, link->prog, link, NULL, flags,
-			       id_or_fd, revision);
+	ret = _bpf_mprog_attach(entry, &entry_new, link->prog, link, NULL,
+				filter, tcx_filter_equals, filter_old, flags,
+				id_or_fd, revision);
 	if (!ret) {
 		if (entry != entry_new) {
 			netkit_entry_update(dev, entry_new);
@@ -650,6 +679,7 @@ static void netkit_link_release(struct bpf_link *link)
 	struct netkit_link *nkl = netkit_link(link);
 	struct bpf_mprog_entry *entry, *entry_new;
 	struct net_device *dev;
+	void *filter = NULL;
 	int ret = 0;
 
 	rtnl_lock();
@@ -661,7 +691,8 @@ static void netkit_link_release(struct bpf_link *link)
 		ret = -ENOENT;
 		goto out;
 	}
-	ret = bpf_mprog_detach(entry, &entry_new, link->prog, link, 0, 0, 0);
+	ret = _bpf_mprog_detach(entry, &entry_new, link->prog, link, 0, 0, 0,
+				&filter);
 	if (!ret) {
 		if (!bpf_mprog_total(entry_new))
 			entry_new = NULL;
@@ -669,6 +700,7 @@ static void netkit_link_release(struct bpf_link *link)
 		netkit_entry_sync();
 		bpf_mprog_commit(entry);
 		nkl->dev = NULL;
+		kfree(filter);
 	}
 out:
 	WARN_ON_ONCE(ret);
@@ -785,6 +817,8 @@ static int netkit_link_init(struct netkit_link *nkl,
 int netkit_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
 {
 	struct bpf_link_primer link_primer;
+	struct tcx_filter *filter = NULL;
+	void *filter_old = NULL;
 	struct netkit_link *nkl;
 	struct net_device *dev;
 	int ret;
@@ -807,15 +841,28 @@ int netkit_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
 		kfree(nkl);
 		goto out;
 	}
+	if (attr->filter_mask) {
+		filter = kzalloc(sizeof(*filter), GFP_KERNEL);
+		if (!filter) {
+			ret = -ENOMEM;
+			goto out;
+		}
+		// TODO: needs validation logic
+		filter->act = attr->filter_action;
+		filter->mask = attr->filter_mask;
+	}
 	ret = netkit_link_prog_attach(&nkl->link,
 				      attr->link_create.flags,
 				      attr->link_create.netkit.relative_fd,
-				      attr->link_create.netkit.expected_revision);
+				      attr->link_create.netkit.expected_revision,
+				      filter, &filter_old);
 	if (ret) {
 		nkl->dev = NULL;
 		bpf_link_cleanup(&link_primer);
+		kfree(filter);
 		goto out;
 	}
+	kfree(filter_old);
 	ret = bpf_link_settle(&link_primer);
 out:
 	rtnl_unlock();
@@ -824,6 +871,7 @@ out:
 
 static void netkit_release_all(struct net_device *dev)
 {
+	struct tcx_filter *filter = NULL;
 	struct bpf_mprog_entry *entry;
 	struct bpf_tuple tuple = {};
 	struct bpf_mprog_fp *fp;
@@ -834,11 +882,12 @@ static void netkit_release_all(struct net_device *dev)
 		return;
 	netkit_entry_update(dev, NULL);
 	netkit_entry_sync();
-	bpf_mprog_foreach_tuple(entry, fp, cp, tuple) {
+	bpf_mprog_foreach_tuple(entry, fp, cp, tuple, filter) {
 		if (tuple.link)
 			netkit_link(tuple.link)->dev = NULL;
 		else
 			bpf_prog_put(tuple.prog);
+		kfree(filter);
 	}
 }
 

@@ -13,6 +13,8 @@ int tcx_prog_attach(const union bpf_attr *attr, struct bpf_prog *prog)
 	struct net *net = current->nsproxy->net_ns;
 	struct bpf_mprog_entry *entry, *entry_new;
 	struct bpf_prog *replace_prog = NULL;
+	struct tcx_filter *filter = NULL;
+	void *filter_old = NULL;
 	struct net_device *dev;
 	int ret;
 
@@ -36,18 +38,32 @@ int tcx_prog_attach(const union bpf_attr *attr, struct bpf_prog *prog)
 		ret = -ENOMEM;
 		goto out;
 	}
-	ret = bpf_mprog_attach(entry, &entry_new, prog, NULL, replace_prog,
-			       attr->attach_flags, attr->relative_fd,
-			       attr->expected_revision);
+	if (attr->filter_mask) {
+		filter = kzalloc(sizeof(*filter), GFP_KERNEL);
+		if (!filter) {
+			ret = -ENOMEM;
+			goto out;
+		}
+		// TODO: needs validation logic
+		filter->act = attr->filter_action;
+		filter->mask = attr->filter_mask;
+	}
+	ret = _bpf_mprog_attach(entry, &entry_new, prog, NULL, replace_prog,
+				filter, tcx_filter_equals, &filter_old,
+				attr->attach_flags, attr->relative_fd,
+				attr->expected_revision);
 	if (!ret) {
 		if (entry != entry_new) {
 			tcx_entry_update(dev, entry_new, ingress);
 			tcx_entry_sync();
 			tcx_skeys_inc(ingress);
 		}
+		kfree(filter_old);
 		bpf_mprog_commit(entry);
-	} else if (created) {
-		tcx_entry_free(entry);
+	} else {
+		if (created)
+			tcx_entry_free(entry);
+		kfree(filter);
 	}
 out:
 	if (replace_prog)
@@ -62,6 +78,7 @@ int tcx_prog_detach(const union bpf_attr *attr, struct bpf_prog *prog)
 	struct net *net = current->nsproxy->net_ns;
 	struct bpf_mprog_entry *entry, *entry_new;
 	struct net_device *dev;
+	void *filter = NULL;
 	int ret;
 
 	rtnl_lock();
@@ -75,8 +92,9 @@ int tcx_prog_detach(const union bpf_attr *attr, struct bpf_prog *prog)
 		ret = -ENOENT;
 		goto out;
 	}
-	ret = bpf_mprog_detach(entry, &entry_new, prog, NULL, attr->attach_flags,
-			       attr->relative_fd, attr->expected_revision);
+	ret = _bpf_mprog_detach(entry, &entry_new, prog, NULL, attr->attach_flags,
+				attr->relative_fd, attr->expected_revision,
+				&filter);
 	if (!ret) {
 		if (!tcx_entry_is_active(entry_new))
 			entry_new = NULL;
@@ -86,6 +104,7 @@ int tcx_prog_detach(const union bpf_attr *attr, struct bpf_prog *prog)
 		bpf_mprog_commit(entry);
 		if (!entry_new)
 			tcx_entry_free(entry);
+		kfree(filter);
 	}
 out:
 	rtnl_unlock();
@@ -95,6 +114,7 @@ out:
 void tcx_uninstall(struct net_device *dev, bool ingress)
 {
 	struct bpf_mprog_entry *entry, *entry_new = NULL;
+	struct tcx_filter *filter = NULL;
 	struct bpf_tuple tuple = {};
 	struct bpf_mprog_fp *fp;
 	struct bpf_mprog_cp *cp;
@@ -108,12 +128,13 @@ void tcx_uninstall(struct net_device *dev, bool ingress)
 		bpf_mprog_clear_all(entry, &entry_new);
 	tcx_entry_update(dev, entry_new, ingress);
 	tcx_entry_sync();
-	bpf_mprog_foreach_tuple(entry, fp, cp, tuple) {
+	bpf_mprog_foreach_tuple(entry, fp, cp, tuple, filter) {
 		if (tuple.link)
 			tcx_link(tuple.link)->dev = NULL;
 		else
 			bpf_prog_put(tuple.prog);
 		tcx_skeys_dec(ingress);
+		kfree(filter);
 	}
 	if (!active)
 		tcx_entry_free(entry);
@@ -139,7 +160,8 @@ out:
 }
 
 static int tcx_link_prog_attach(struct bpf_link *link, u32 flags, u32 id_or_fd,
-				u64 revision)
+				u64 revision, struct tcx_filter *filter,
+				void **filter_old)
 {
 	struct tcx_link *tcx = tcx_link(link);
 	bool created, ingress = tcx->location == BPF_TCX_INGRESS;
@@ -151,8 +173,9 @@ static int tcx_link_prog_attach(struct bpf_link *link, u32 flags, u32 id_or_fd,
 	entry = tcx_entry_fetch_or_create(dev, ingress, &created);
 	if (!entry)
 		return -ENOMEM;
-	ret = bpf_mprog_attach(entry, &entry_new, link->prog, link, NULL, flags,
-			       id_or_fd, revision);
+	ret = _bpf_mprog_attach(entry, &entry_new, link->prog, link, NULL,
+				filter, tcx_filter_equals, filter_old, flags,
+				id_or_fd, revision);
 	if (!ret) {
 		if (entry != entry_new) {
 			tcx_entry_update(dev, entry_new, ingress);
@@ -172,6 +195,7 @@ static void tcx_link_release(struct bpf_link *link)
 	bool ingress = tcx->location == BPF_TCX_INGRESS;
 	struct bpf_mprog_entry *entry, *entry_new;
 	struct net_device *dev;
+	void *filter = NULL;
 	int ret = 0;
 
 	rtnl_lock();
@@ -183,7 +207,8 @@ static void tcx_link_release(struct bpf_link *link)
 		ret = -ENOENT;
 		goto out;
 	}
-	ret = bpf_mprog_detach(entry, &entry_new, link->prog, link, 0, 0, 0);
+	ret = _bpf_mprog_detach(entry, &entry_new, link->prog, link, 0, 0, 0,
+				&filter);
 	if (!ret) {
 		if (!tcx_entry_is_active(entry_new))
 			entry_new = NULL;
@@ -194,6 +219,7 @@ static void tcx_link_release(struct bpf_link *link)
 		if (!entry_new)
 			tcx_entry_free(entry);
 		tcx->dev = NULL;
+		kfree(filter);
 	}
 out:
 	WARN_ON_ONCE(ret);
@@ -311,6 +337,8 @@ int tcx_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
 {
 	struct net *net = current->nsproxy->net_ns;
 	struct bpf_link_primer link_primer;
+	struct tcx_filter *filter = NULL;
+	void *filter_old = NULL;
 	struct net_device *dev;
 	struct tcx_link *tcx;
 	int ret;
@@ -331,14 +359,27 @@ int tcx_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
 		kfree(tcx);
 		goto out;
 	}
+	if (attr->filter_mask) {
+		filter = kzalloc(sizeof(*filter), GFP_KERNEL);
+		if (!filter) {
+			ret = -ENOMEM;
+			goto out;
+		}
+		// TODO: needs validation logic
+		filter->act = attr->filter_action;
+		filter->mask = attr->filter_mask;
+	}
 	ret = tcx_link_prog_attach(&tcx->link, attr->link_create.flags,
 				   attr->link_create.tcx.relative_fd,
-				   attr->link_create.tcx.expected_revision);
+				   attr->link_create.tcx.expected_revision,
+				   filter, &filter_old);
 	if (ret) {
 		tcx->dev = NULL;
 		bpf_link_cleanup(&link_primer);
+		kfree(filter);
 		goto out;
 	}
+	kfree(filter_old);
 	ret = bpf_link_settle(&link_primer);
 out:
 	rtnl_unlock();

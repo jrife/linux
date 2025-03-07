@@ -818,6 +818,8 @@ int bpf_link_create(int prog_fd, int target_fd,
 			attr.link_create.tcx.relative_fd = relative_fd;
 		}
 		attr.link_create.tcx.expected_revision = OPTS_GET(opts, tcx.expected_revision, 0);
+		attr.link_create.tcx.filter_action = OPTS_GET(opts, tcx.filter_action, 0);
+		attr.link_create.tcx.filter_mask = OPTS_GET(opts, tcx.filter_mask, 0);
 		if (!OPTS_ZEROED(opts, tcx))
 			return libbpf_err(-EINVAL);
 		break;
@@ -834,6 +836,8 @@ int bpf_link_create(int prog_fd, int target_fd,
 			attr.link_create.netkit.relative_fd = relative_fd;
 		}
 		attr.link_create.netkit.expected_revision = OPTS_GET(opts, netkit.expected_revision, 0);
+		attr.link_create.netkit.filter_action = OPTS_GET(opts, netkit.filter_action, 0);
+		attr.link_create.netkit.filter_mask = OPTS_GET(opts, netkit.filter_mask, 0);
 		if (!OPTS_ZEROED(opts, netkit))
 			return libbpf_err(-EINVAL);
 		break;

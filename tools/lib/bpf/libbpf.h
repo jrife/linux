@@ -841,9 +841,11 @@ struct bpf_tcx_opts {
 	__u32 relative_fd;
 	__u32 relative_id;
 	__u64 expected_revision;
+	__u32 filter_action;
+	__u32 filter_mask;
 	size_t :0;
 };
-#define bpf_tcx_opts__last_field expected_revision
+#define bpf_tcx_opts__last_field filter_mask
 
 LIBBPF_API struct bpf_link *
 bpf_program__attach_tcx(const struct bpf_program *prog, int ifindex,
@@ -856,9 +858,11 @@ struct bpf_netkit_opts {
 	__u32 relative_fd;
 	__u32 relative_id;
 	__u64 expected_revision;
+	__u32 filter_action;
+	__u32 filter_mask;
 	size_t :0;
 };
-#define bpf_netkit_opts__last_field expected_revision
+#define bpf_netkit_opts__last_field filter_mask
 
 LIBBPF_API struct bpf_link *
 bpf_program__attach_netkit(const struct bpf_program *prog, int ifindex,

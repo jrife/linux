@@ -85,7 +85,7 @@
  *   rcu_read_lock();
  *   // fetch active @entry from attach location
  *   [...]
- *   bpf_mprog_foreach_prog(entry, fp, prog) {
+ *   bpf_mprog_foreach_prog(entry, fp, prog, priv) {
  *       ret = bpf_prog_run(prog, [...]);
  *       // process @ret from program
  *   }
@@ -112,24 +112,30 @@
  * the replacement case where we don't swap the bpf_mprog_entry.
  */
 
-#define bpf_mprog_foreach_tuple(entry, fp, cp, t)			\
+#define bpf_mprog_foreach_tuple(entry, fp, cp, t, pv)			\
 	for (fp = &entry->fp_items[0], cp = &entry->parent->cp_items[0];\
 	     ({								\
 		t.prog = READ_ONCE(fp->prog);				\
 		t.link = cp->link;					\
+		pv = (typeof(pv))READ_ONCE(fp->priv);			\
 		t.prog;							\
 	      });							\
 	     fp++, cp++)
 
-#define bpf_mprog_foreach_prog(entry, fp, p)				\
+#define bpf_mprog_foreach_prog(entry, fp, p, pv)			\
 	for (fp = &entry->fp_items[0];					\
-	     (p = READ_ONCE(fp->prog));					\
+	     ({								\
+		p = READ_ONCE(fp->prog);				\
+		pv = (typeof(pv))READ_ONCE(fp->priv);			\
+		p;							\
+	      });							\
 	     fp++)
 
 #define BPF_MPROG_MAX 64
 
 struct bpf_mprog_fp {
 	struct bpf_prog *prog;
+	void *priv;
 };
 
 struct bpf_mprog_cp {
@@ -155,6 +161,8 @@ struct bpf_tuple {
 	struct bpf_link *link;
 };
 
+typedef bool (*priv_cmp_t)(void *a, void *b);
+
 static inline struct bpf_mprog_entry *
 bpf_mprog_peer(const struct bpf_mprog_entry *entry)
 {
@@ -166,7 +174,7 @@ bpf_mprog_peer(const struct bpf_mprog_entry *entry)
 
 static inline void bpf_mprog_bundle_init(struct bpf_mprog_bundle *bundle)
 {
-	BUILD_BUG_ON(sizeof(bundle->a.fp_items[0]) > sizeof(u64));
+	BUILD_BUG_ON(sizeof(bundle->a.fp_items[0]) > sizeof(u64)*2);
 	BUILD_BUG_ON(ARRAY_SIZE(bundle->a.fp_items) !=
 		     ARRAY_SIZE(bundle->cp_items));
 
@@ -204,8 +212,9 @@ static inline bool bpf_mprog_exists(struct bpf_mprog_entry *entry,
 {
 	const struct bpf_mprog_fp *fp;
 	const struct bpf_prog *tmp;
+	void *priv;
 
-	bpf_mprog_foreach_prog(entry, fp, tmp) {
+	bpf_mprog_foreach_prog(entry, fp, tmp, priv) {
 		if (tmp == prog)
 			return true;
 	}
@@ -311,17 +320,34 @@ static inline void bpf_mprog_read(struct bpf_mprog_entry *entry, u32 idx,
 
 static inline void bpf_mprog_write(struct bpf_mprog_fp *fp,
 				   struct bpf_mprog_cp *cp,
-				   struct bpf_tuple *tuple)
+				   struct bpf_tuple *tuple,
+				   bool update_priv,
+				   void *priv)
 {
 	WRITE_ONCE(fp->prog, tuple->prog);
+	if (update_priv)
+		fp->priv = priv;
 	cp->link = tuple->link;
 }
+
+int _bpf_mprog_attach(struct bpf_mprog_entry *entry,
+		      struct bpf_mprog_entry **entry_new,
+		      struct bpf_prog *prog_new, struct bpf_link *link,
+		      struct bpf_prog *prog_old,
+		      void *priv_new, priv_cmp_t priv_cmp,
+		      void **priv_old,
+		      u32 flags, u32 id_or_fd, u64 revision);
 
 int bpf_mprog_attach(struct bpf_mprog_entry *entry,
 		     struct bpf_mprog_entry **entry_new,
 		     struct bpf_prog *prog_new, struct bpf_link *link,
 		     struct bpf_prog *prog_old,
 		     u32 flags, u32 id_or_fd, u64 revision);
+
+int _bpf_mprog_detach(struct bpf_mprog_entry *entry,
+		      struct bpf_mprog_entry **entry_new,
+		      struct bpf_prog *prog, struct bpf_link *link,
+		      u32 flags, u32 id_or_fd, u64 revision, void **priv);
 
 int bpf_mprog_detach(struct bpf_mprog_entry *entry,
 		     struct bpf_mprog_entry **entry_new,

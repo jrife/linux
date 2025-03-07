@@ -432,11 +432,15 @@ struct bpf_link_create_opts {
 			__u32 relative_fd;
 			__u32 relative_id;
 			__u64 expected_revision;
+			__u32 filter_action;
+			__u32 filter_mask;
 		} tcx;
 		struct {
 			__u32 relative_fd;
 			__u32 relative_id;
 			__u64 expected_revision;
+			__u32 filter_action;
+			__u32 filter_mask;
 		} netkit;
 	};
 	size_t :0;
