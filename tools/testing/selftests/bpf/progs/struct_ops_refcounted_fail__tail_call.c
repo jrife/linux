@@ -7,6 +7,8 @@
 
 char _license[] SEC("license") = "GPL";
 
+__attribute__((nomerge)) extern void bpf_task_release(struct task_struct *p) __ksym;
+
 struct {
 	__uint(type, BPF_MAP_TYPE_PROG_ARRAY);
 	__uint(max_entries, 1);

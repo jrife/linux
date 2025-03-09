@@ -7,9 +7,13 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include "bpf_misc.h"
+#include "bpf_kfuncs.h"
 #include "errno.h"
 
 char _license[] SEC("license") = "GPL";
+
+int bpf_dynptr_copy(struct bpf_dynptr *dst_ptr, u32 dst_off,
+		    struct bpf_dynptr *src_ptr, u32 src_off, u32 size) __weak __ksym;
 
 int pid, err, val;
 
