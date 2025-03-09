@@ -4,6 +4,9 @@
 #include <bpf/bpf_helpers.h>
 #include "bpf_experimental.h"
 
+int bpf_copy_from_user_str(void *dst, u32, const void *, u64) __weak __ksym;
+
+
 struct foo {
 	struct bpf_spin_lock lock;
 	int data;
