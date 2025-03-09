@@ -9,6 +9,8 @@
 
 char _license[] SEC("license") = "GPL";
 
+int bpf_copy_from_user_str(void *dst, u32, const void *, u64) __weak __ksym;
+
 struct {
 	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);

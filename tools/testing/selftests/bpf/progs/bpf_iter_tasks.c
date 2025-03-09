@@ -6,6 +6,9 @@
 
 char _license[] SEC("license") = "GPL";
 
+int bpf_copy_from_user_task_str(void *dst, u32, const void *,
+				struct task_struct *, u64) __weak __ksym;
+
 uint32_t tid = 0;
 int num_unknown_tid = 0;
 int num_known_tid = 0;
