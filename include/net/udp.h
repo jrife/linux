@@ -66,6 +66,7 @@ struct udp_hslot {
 		struct hlist_nulls_head	nulls_head;
 	};
 	int			count;
+	__u64			rem_count;
 	spinlock_t		lock;
 } __aligned(2 * sizeof(long));
 

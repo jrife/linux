@@ -2209,6 +2209,7 @@ void udp_lib_unhash(struct sock *sk)
 			spin_lock(&hslot2->lock);
 			hlist_del_init_rcu(&udp_sk(sk)->udp_portaddr_node);
 			hslot2->count--;
+			hslot2->rem_count++;
 			spin_unlock(&hslot2->lock);
 
 			udp_unhash4(udptable, sk);
@@ -2244,6 +2245,7 @@ void udp_lib_rehash(struct sock *sk, u16 newhash, u16 newhash4)
 				spin_lock(&hslot2->lock);
 				hlist_del_init_rcu(&udp_sk(sk)->udp_portaddr_node);
 				hslot2->count--;
+				hslot2->rem_count++;
 				spin_unlock(&hslot2->lock);
 
 				spin_lock(&nhslot2->lock);
@@ -3393,6 +3395,7 @@ struct bpf_udp_iter_state {
 	int offset;
 	struct sock **batch;
 	bool st_bucket_done;
+	__u64 bucket_rem_count;
 };
 
 static int bpf_iter_udp_realloc_batch(struct bpf_udp_iter_state *iter,
@@ -3411,12 +3414,21 @@ static struct sock *bpf_iter_udp_batch(struct seq_file *seq)
 	resume_bucket = state->bucket;
 	resume_offset = iter->offset;
 
-	/* The current batch is done, so advance the bucket. */
-	if (iter->st_bucket_done)
-		state->bucket++;
-
 	udptable = udp_get_table_seq(seq, net);
 
+	/* The current batch is done, so advance the bucket. */
+	if (iter->st_bucket_done) {
+		state->bucket++;
+	} else {
+		struct udp_hslot *hslot2 = &udptable->hash2[resume_bucket].hslot;
+
+		spin_lock_bh(&hslot2->lock);
+		if (iter->bucket_rem_count < hslot2->rem_count)
+			resume_offset -= min_t(__u64,
+					       hslot2->rem_count - iter->bucket_rem_count,
+					       resume_offset);
+		spin_unlock_bh(&hslot2->lock);
+	}
 again:
 	/* New batch for the next bucket.
 	 * Iterate over the hash table to find a bucket with sockets matching
@@ -3438,6 +3450,7 @@ again:
 
 		iter->offset = 0;
 		spin_lock_bh(&hslot2->lock);
+		iter->bucket_rem_count = hslot2->rem_count;
 		udp_portaddr_for_each_entry(sk, &hslot2->head) {
 			if (seq_sk_match(seq, sk)) {
 				/* Resume from the last iterated socket at the
@@ -3695,6 +3708,7 @@ void __init udp_table_init(struct udp_table *table, const char *name)
 	for (i = 0; i <= table->mask; i++) {
 		INIT_HLIST_HEAD(&table->hash2[i].hslot.head);
 		table->hash2[i].hslot.count = 0;
+		table->hash2[i].hslot.rem_count = 0;
 		spin_lock_init(&table->hash2[i].hslot.lock);
 	}
 	udp_table_hash4_init(table);

@@ -88,4 +88,25 @@ int iter_udp_soreuse(struct bpf_iter__udp *ctx)
 	return 0;
 }
 
+SEC("iter/udp")
+int iter_udp_soreuse_cookie(struct bpf_iter__udp *ctx)
+{
+	struct sock *sk = (struct sock *)ctx->udp_sk;
+	__u64 sock_cookie;
+
+	if (!sk)
+		return 0;
+
+	sock_cookie = bpf_get_socket_cookie(sk);
+	sk = bpf_core_cast(sk, struct sock);
+	if (sk->sk_family != AF_INET)
+		return 0;
+	if (sk->sk_num != ports[0])
+		return 0;
+
+	bpf_seq_write(ctx->meta->seq, &sock_cookie, sizeof(sock_cookie));
+
+	return 0;
+}
+
 char _license[] SEC("license") = "GPL";
