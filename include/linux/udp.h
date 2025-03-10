@@ -101,6 +101,9 @@ struct udp_sock {
 
 	/* Cache friendly copy of sk->sk_peek_off >= 0 */
 	bool		peeking_with_offset;
+
+	/* Used by BPF socket iterators to track progress in a hash2 bucket. */
+	__s64		idx;
 };
 
 #define udp_test_bit(nr, sk)			\
