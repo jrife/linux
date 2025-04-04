@@ -3401,6 +3401,21 @@ struct bpf_udp_iter_state {
 
 static int bpf_iter_udp_realloc_batch(struct bpf_udp_iter_state *iter,
 				      unsigned int new_batch_sz);
+static struct sock *bpf_iter_udp_resume(struct udp_hslot *hslot2,
+					union bpf_udp_iter_batch_item *cookies,
+					int n_cookies)
+{
+	struct sock *sk = NULL;
+	int i = 0;
+
+	for (; i < n_cookies; i++)
+		udp_portaddr_for_each_entry(sk, &hslot2->head)
+			if (cookies[i].cookie == atomic64_read(&sk->sk_cookie))
+				goto done;
+done:
+	return sk;
+}
+
 static struct sock *bpf_iter_udp_batch(struct seq_file *seq)
 {
 	struct bpf_udp_iter_state *iter = seq->private;
@@ -3443,16 +3458,16 @@ again:
 			continue;
 
 		spin_lock_bh(&hslot2->lock);
-		udp_portaddr_for_each_entry(sk, &hslot2->head) {
+		if (state->bucket == resume_bucket)
+			sk = bpf_iter_udp_resume(hslot2,
+						 &iter->batch[find_cookie],
+						 end_cookie - find_cookie);
+		else
+			/* Initialize sk to the first socket */
+			udp_portaddr_for_each_entry(sk, &hslot2->head)
+				break;
+		udp_portaddr_for_each_entry_from(sk) {
 			if (seq_sk_match(seq, sk)) {
-				/* Resume from the as yet unvisited socket from
-				 * the last batch.
-				 */
-				if (state->bucket == resume_bucket &&
-				    find_cookie < end_cookie &&
-				    !batch_sks && /* don't skip if we already found a match */
-				    atomic64_read(&sk->sk_cookie) != iter->batch[find_cookie].cookie)
-					continue;
 				if (iter->end_sk < iter->max_sk) {
 					sock_hold(sk);
 					iter->batch[iter->end_sk++].sock = sk;
@@ -3464,22 +3479,6 @@ again:
 
 		if (iter->end_sk)
 			break;
-		if (state->bucket == resume_bucket &&
-		    find_cookie < end_cookie - 1) {
-			/* The socket previously at find_cookie is no longer in
-			 * resume_bucket's list. Try to find the next saved
-			 * cookie to see if we can resume from that socket.
-			 *
-			 * If we've searched for all unseen cookies (find_cookie
-			 * == end_cookie - 1) and haven't found anything, this
-			 * indicates that all sockets we saw last time have been
-			 * removed and anything left is new; just proceed to the
-			 * next bucket as we normally would, as we're done with
-			 * this bucket.
-			 */
-			state->bucket--;
-			find_cookie++;
-		}
 	}
 
 	/* All done: no batch made. */
