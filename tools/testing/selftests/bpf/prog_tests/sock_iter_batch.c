@@ -107,14 +107,14 @@ static int get_nth_socket(int *fds, int fds_len, struct bpf_link *link, int n)
 	if (!ASSERT_GE(iter_fd, 0, "bpf_iter_create"))
 		return -1;
 
-	for (; n > 0; n--) {
+	for (; n >= 0; n--) {
 		nread = read(iter_fd, &out, sizeof(out));
 		if (!nread || !ASSERT_GE(nread, 1, "nread"))
 			goto done;
 	}
 
 	for (i = 0; i < fds_len && nth_sock_idx < 0; i++)
-		if (socket_cookie(fds[i]) == out.cookie)
+		if (fds[i] >= 0 && socket_cookie(fds[i]) == out.cookie)
 			nth_sock_idx = i;
 done:
 	if (iter_fd < 0)
@@ -268,7 +268,7 @@ static void do_remove_unseen_test(int sock_type)
 	if (!ASSERT_GE(iter_fd, 0, "bpf_iter_create"))
 		goto done;
 
-	/* Iterate through the first sockets. */
+	/* Iterate through the first socket. */
 	read_n(iter_fd, 1, counts, ARRAY_SIZE(counts));
 
 	/* Make sure we a socket from fds. */
@@ -276,10 +276,10 @@ static void do_remove_unseen_test(int sock_type)
 
 	/* Close what would be the next socket in the bucket to exercise the
 	 * condition where the first saved cookie in the batch is no longer
-	 * there, triggering the condition that walks back the bucket,
+	 * there, triggering the block that walks back the bucket,
 	 * (state->bucket--) to look for the next saved cookie.
 	 */
-	close_idx = get_nth_socket(fds, nr_soreuse, link, 2);
+	close_idx = get_nth_socket(fds, nr_soreuse, link, 1);
 	if (!ASSERT_GE(close_idx, 0, "close_idx"))
 		goto done;
 	close(fds[close_idx]);
@@ -292,6 +292,74 @@ static void do_remove_unseen_test(int sock_type)
 	 */
 	check_n_were_seen_once(fds, nr_soreuse, nr_soreuse - 1, counts,
 			       ARRAY_SIZE(counts));
+done:
+	free_fds(fds, nr_soreuse);
+	if (iter_fd < 0)
+		close(iter_fd);
+	bpf_link__destroy(link);
+	sock_iter_batch__destroy(skel);
+}
+
+static void do_remove_all_test(int sock_type)
+{
+	struct sock_count counts[nr_soreuse] = {};
+	struct bpf_link *link = NULL;
+	struct sock_iter_batch *skel;
+	int err, iter_fd = -1;
+	int i, close_idx;
+	int *fds;
+
+	skel = sock_iter_batch__open();
+	if (!ASSERT_OK_PTR(skel, "sock_iter_batch__open"))
+		return;
+
+	/* Prepare a bucket of sockets in the kernel hashtable */
+	int local_port;
+
+	fds = start_reuseport_server(AF_INET6, sock_type, "::1", 0, 0,
+				     nr_soreuse);
+	if (!ASSERT_OK_PTR(fds, "start_reuseport_server"))
+		goto done;
+	local_port = get_socket_local_port(*fds);
+	if (!ASSERT_GE(local_port, 0, "get_socket_local_port"))
+		goto done;
+	skel->rodata->ports[0] = ntohs(local_port);
+	skel->rodata->sf = AF_INET;
+
+	err = sock_iter_batch__load(skel);
+	if (!ASSERT_OK(err, "sock_iter_batch__load"))
+		goto done;
+
+	link = bpf_program__attach_iter(sock_type == SOCK_STREAM ?
+					skel->progs.iter_tcp_soreuse :
+					skel->progs.iter_udp_soreuse,
+					NULL);
+	if (!ASSERT_OK_PTR(link, "bpf_program__attach_iter"))
+		goto done;
+
+	iter_fd = bpf_iter_create(bpf_link__fd(link));
+	if (!ASSERT_GE(iter_fd, 0, "bpf_iter_create"))
+		goto done;
+
+	/* Iterate through the first socket. */
+	read_n(iter_fd, 1, counts, ARRAY_SIZE(counts));
+
+	/* Make sure we a socket from fds. */
+	check_n_were_seen_once(fds, nr_soreuse, 1, counts, ARRAY_SIZE(counts));
+
+	/* Close all remaining sockets to exhaust the list of saved cookies and
+	 * exit without putting any sockets into the batch on the next read.
+	 */
+	for (i = 0; i < nr_soreuse - 1; i++) {
+		close_idx = get_nth_socket(fds, nr_soreuse, link, 1);
+		if (!ASSERT_GE(close_idx, 0, "close_idx"))
+			goto done;
+		close(fds[close_idx]);
+		fds[close_idx] = -1;
+	}
+
+	/* Make sure there are no more sockets returned */
+	ASSERT_EQ(read_n(iter_fd, -1, counts, ARRAY_SIZE(counts)), 0, "read_n");
 done:
 	free_fds(fds, nr_soreuse);
 	if (iter_fd < 0)
@@ -561,6 +629,7 @@ void test_sock_iter_batch(void)
 		do_test(SOCK_DGRAM, false);
 		do_remove_seen_test(SOCK_DGRAM);
 		do_remove_unseen_test(SOCK_DGRAM);
+		do_remove_all_test(SOCK_DGRAM);
 		do_add_test(SOCK_DGRAM);
 		do_realloc_test(SOCK_DGRAM);
 	}
