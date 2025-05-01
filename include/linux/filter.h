@@ -778,8 +778,13 @@ struct bpf_redirect_info {
 	u32 kern_flags;
 };
 
+struct bpf_tcx_info {
+	u32 flags;
+};
+
 struct bpf_net_context {
 	struct bpf_redirect_info ri;
+	struct bpf_tcx_info tcxi;
 	struct list_head cpu_map_flush_list;
 	struct list_head dev_map_flush_list;
 	struct list_head xskmap_map_flush_list;
@@ -792,6 +797,7 @@ static inline struct bpf_net_context *bpf_net_ctx_set(struct bpf_net_context *bp
 	if (tsk->bpf_net_context != NULL)
 		return NULL;
 	bpf_net_ctx->ri.kern_flags = 0;
+	bpf_net_ctx->tcxi.flags = 0;
 
 	tsk->bpf_net_context = bpf_net_ctx;
 	return bpf_net_ctx;
@@ -896,6 +902,17 @@ static inline void bpf_compute_data_pointers(struct sk_buff *skb)
 	BUILD_BUG_ON(sizeof(*cb) > sizeof_field(struct sk_buff, cb));
 	cb->data_meta = skb->data - skb_metadata_len(skb);
 	cb->data_end  = skb->data + skb_headlen(skb);
+}
+
+enum {
+	BPF_F_TCX_DEFER	= (1ULL << 0),
+};
+
+static inline struct bpf_tcx_info *bpf_net_ctx_get_tcxi(void)
+{
+	struct bpf_net_context *bpf_net_ctx = bpf_net_ctx_get();
+
+	return &bpf_net_ctx->tcxi;
 }
 
 /* Similar to bpf_compute_data_pointers(), except that save orginal

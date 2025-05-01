@@ -4234,17 +4234,26 @@ static __always_inline enum tcx_action_base
 tcx_run(const struct bpf_mprog_entry *entry, struct sk_buff *skb,
 	const bool needs_mac)
 {
+	struct bpf_tcx_info *tcxi = bpf_net_ctx_get_tcxi();
 	const struct bpf_mprog_fp *fp;
 	const struct bpf_prog *prog;
 	int ret = TCX_NEXT;
+	int next_ret;
 
 	if (needs_mac)
 		__skb_push(skb, skb->mac_len);
 	bpf_mprog_foreach_prog(entry, fp, prog) {
 		bpf_compute_data_pointers(skb);
-		ret = bpf_prog_run(prog, skb);
-		if (ret != TCX_NEXT)
+		tcxi->flags = 0;
+		next_ret = bpf_prog_run(prog, skb);
+		if (tcxi->flags & BPF_F_TCX_DEFER) {
+			ret = next_ret;
+			continue;
+		}
+		if (next_ret != TCX_NEXT) {
+			ret = next_ret;
 			break;
+		}
 	}
 	if (needs_mac)
 		__skb_pull(skb, skb->mac_len);

@@ -12292,6 +12292,34 @@ static const struct btf_kfunc_id_set bpf_sk_iter_kfunc_set = {
 	.filter = tracing_iter_filter,
 };
 
+__bpf_kfunc_start_defs();
+
+__bpf_kfunc int bpf_tcx_defer_verdict(void)
+{
+	struct bpf_tcx_info *tcxi = bpf_net_ctx_get_tcxi();
+
+	tcxi->flags |= BPF_F_TCX_DEFER;
+
+	return 0;
+}
+
+__bpf_kfunc_end_defs();
+
+BTF_KFUNCS_START(bpf_tcx_kfunc_ids)
+BTF_ID_FLAGS(func, bpf_tcx_defer_verdict)
+BTF_KFUNCS_END(bpf_tcx_kfunc_ids)
+
+static int tcx_filter(const struct bpf_prog *prog, u32 kfunc_id)
+{
+	return 0;
+}
+
+static const struct btf_kfunc_id_set bpf_tcx_kfunc_set = {
+	.owner = THIS_MODULE,
+	.set   = &bpf_tcx_kfunc_ids,
+	.filter = tcx_filter,
+};
+
 static int init_subsystem(void)
 {
 	return register_btf_kfunc_id_set(BPF_PROG_TYPE_TRACING, &bpf_sk_iter_kfunc_set);
