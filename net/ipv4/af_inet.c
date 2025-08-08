@@ -539,6 +539,8 @@ int __inet_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len,
 			goto out_release_sock;
 		}
 		if (!(flags & BIND_FROM_BPF)) {
+			// jrife: Here's where the POST_BIND program is called.
+			// I guess this is after "bind" (get_port).
 			err = BPF_CGROUP_RUN_PROG_INET4_POST_BIND(sk);
 			if (err) {
 				inet->inet_saddr = inet->inet_rcv_saddr = 0;
@@ -669,15 +671,21 @@ int __inet_stream_connect(struct socket *sock, struct sockaddr *uaddr,
 			goto out;
 
 		if (BPF_CGROUP_PRE_CONNECT_ENABLED(sk)) {
+			// jrife: This just runs the SOCK_ADDR hook. We can't
+			// access the underlying socket to add it to a map :(.
 			err = sk->sk_prot->pre_connect(sk, uaddr, addr_len);
 			if (err)
 				goto out;
 		}
+		
+		// jrife: We kind of need something here to intercept and add
+		// a socket to a map /after/ the destination address rewrite.
 
 		err = sk->sk_prot->connect(sk, uaddr, addr_len);
 		if (err < 0)
 			goto out;
 
+		// jrife: Or maybe here, a POST_CONNECT hook?
 		sock->state = SS_CONNECTING;
 
 		if (!err && inet_test_bit(DEFER_CONNECT, sk))

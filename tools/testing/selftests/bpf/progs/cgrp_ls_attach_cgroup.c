@@ -34,6 +34,7 @@ int set_cookie(struct bpf_sock_addr *ctx)
 	if (!sk)
 		return 1;
 
+	// jrife: What's this doing?
 	tcp_sk = bpf_skc_to_tcp_sock(sk);
 	if (!tcp_sk)
 		return 1;

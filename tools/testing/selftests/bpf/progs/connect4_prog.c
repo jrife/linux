@@ -170,6 +170,9 @@ int connect_v4_prog(struct bpf_sock_addr *ctx)
 
 	if (ctx->type != SOCK_STREAM && ctx->type != SOCK_DGRAM)
 		return 0;
+	// jrife: Here's one way to do it. We can just look up the socket?
+	// But wait, isn't sk embedded in ctx anyway? Seems like maybe an
+	// oversight.
 	else if (ctx->type == SOCK_STREAM)
 		sk = bpf_sk_lookup_tcp(ctx, &tuple, sizeof(tuple.ipv4),
 				       BPF_F_CURRENT_NETNS, 0);

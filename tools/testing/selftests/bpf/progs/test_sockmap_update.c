@@ -35,6 +35,8 @@ int copy_sock_map(void *ctx)
 	if (!sk)
 		return SK_DROP;
 
+	// jrife: Here is an example of us inserting a bpf_sock into a
+	// SOCKMAP.
 	if (bpf_map_update_elem(&dst_sock_map, &key, sk, 0))
 		failed = true;
 

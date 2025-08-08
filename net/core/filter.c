@@ -12275,6 +12275,7 @@ __bpf_kfunc int bpf_sock_destroy(struct sock_common *sock)
 	if (!sk->sk_prot->diag_destroy || (sk->sk_protocol != IPPROTO_TCP &&
 					   sk->sk_protocol != IPPROTO_UDP))
 		return -EOPNOTSUPP;
+	// jrife: Need to double check the lock context for SOCKMAP iterators
 
 	return sk->sk_prot->diag_destroy(sk, ECONNABORTED);
 }

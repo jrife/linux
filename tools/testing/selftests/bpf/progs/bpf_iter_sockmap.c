@@ -8,6 +8,7 @@
 
 char _license[] SEC("license") = "GPL";
 
+// jrife: iterator example with SOCKMAP
 struct {
 	__uint(type, BPF_MAP_TYPE_SOCKMAP);
 	__uint(max_entries, 64);
@@ -38,6 +39,10 @@ int copy(struct bpf_iter__sockmap *ctx)
 	struct sock *sk = ctx->sk;
 	__u32 tmp, *key = ctx->key;
 	int ret;
+
+	/* jrife: Is there anything preventing us from just calling
+	 * bpf_sock_destroy() on sk here today?
+	 */
 
 	if (!key)
 		return 0;
