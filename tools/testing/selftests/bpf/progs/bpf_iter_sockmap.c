@@ -32,6 +32,8 @@ struct {
 __u32 elems = 0;
 __u32 socks = 0;
 
+int bpf_sock_destroy(struct sock_common *sk) __ksym;
+
 SEC("iter/sockmap")
 int copy(struct bpf_iter__sockmap *ctx)
 {
@@ -50,8 +52,9 @@ int copy(struct bpf_iter__sockmap *ctx)
 	tmp = *key;
 
 	if (sk) {
-		socks++;
-		return bpf_map_update_elem(&dst, &tmp, sk, 0) != 0;
+		return bpf_sock_destroy((struct sock_common *)sk);
+		// socks++;
+		// return bpf_map_update_elem(&dst, &tmp, sk, 0) != 0;
 	}
 
 	ret = bpf_map_delete_elem(&dst, &tmp);

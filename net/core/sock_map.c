@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Copyright (c) 2017 - 2018 Covalent IO, Inc. http://covalent.io */
 
+#include "linux/in.h"
 #include <linux/bpf.h>
 #include <linux/btf_ids.h>
 #include <linux/filter.h>
@@ -760,6 +761,7 @@ static int sock_map_seq_show(struct seq_file *seq, void *v)
 	struct bpf_iter__sockmap ctx = {};
 	struct bpf_iter_meta meta;
 	struct bpf_prog *prog;
+	int ret;
 
 	meta.seq = seq;
 	prog = bpf_iter_get_info(&meta, !v);
@@ -771,9 +773,18 @@ static int sock_map_seq_show(struct seq_file *seq, void *v)
 	if (v) {
 		ctx.key = &info->index;
 		ctx.sk = info->sk;
+		if (info->sk && sk_fullsock(info->sk))
+			lock_sock(info->sk);
 	}
 
-	return bpf_iter_run_prog(prog, &ctx);
+	ret = bpf_iter_run_prog(prog, &ctx);
+
+	if (v) {
+		if (info->sk && sk_fullsock(info->sk))
+			release_sock(info->sk);
+	}
+
+	return ret;
 }
 
 static void sock_map_seq_stop(struct seq_file *seq, void *v)
@@ -1373,6 +1384,7 @@ static int sock_hash_seq_show(struct seq_file *seq, void *v)
 	struct bpf_shtab_elem *elem = v;
 	struct bpf_iter_meta meta;
 	struct bpf_prog *prog;
+	int ret;
 
 	meta.seq = seq;
 	prog = bpf_iter_get_info(&meta, !elem);
@@ -1384,9 +1396,18 @@ static int sock_hash_seq_show(struct seq_file *seq, void *v)
 	if (elem) {
 		ctx.key = elem->key;
 		ctx.sk = elem->sk;
+		if (elem->sk && sk_fullsock(elem->sk))
+			lock_sock(elem->sk);
 	}
 
-	return bpf_iter_run_prog(prog, &ctx);
+	ret = bpf_iter_run_prog(prog, &ctx);
+
+	if (elem) {
+		if (elem->sk && sk_fullsock(elem->sk))
+			release_sock(elem->sk);
+	}
+	
+	return ret;
 }
 
 static void sock_hash_seq_stop(struct seq_file *seq, void *v)
@@ -1946,7 +1967,7 @@ static struct bpf_iter_reg sock_map_iter_reg = {
 		{ offsetof(struct bpf_iter__sockmap, key),
 		  PTR_TO_BUF | PTR_MAYBE_NULL | MEM_RDONLY },
 		{ offsetof(struct bpf_iter__sockmap, sk),
-		  PTR_TO_BTF_ID_OR_NULL },
+		  PTR_TO_BTF_ID_OR_NULL | PTR_TRUSTED },
 	},
 };
 
