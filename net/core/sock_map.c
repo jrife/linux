@@ -723,30 +723,39 @@ static void *sock_map_seq_lookup_elem(struct sock_map_seq_info *info)
 	if (unlikely(info->index >= info->map->max_entries))
 		return NULL;
 
+	rcu_read_lock();
 	info->sk = __sock_map_lookup_elem(info->map, info->index);
+	if (info->sk)
+		sock_hold(info->sk);
+	rcu_read_unlock();
 
 	/* can't return sk directly, since that might be NULL */
 	return info;
 }
 
+static void sock_map_seq_put_elem(struct sock_map_seq_info *info)
+{
+	if (info->sk) {
+		sock_put(info->sk);
+		info->sk = NULL;
+	}
+}
+
 static void *sock_map_seq_start(struct seq_file *seq, loff_t *pos)
-	__acquires(rcu)
 {
 	struct sock_map_seq_info *info = seq->private;
 
 	if (*pos == 0)
 		++*pos;
 
-	/* pairs with sock_map_seq_stop */
-	rcu_read_lock();
 	return sock_map_seq_lookup_elem(info);
 }
 
 static void *sock_map_seq_next(struct seq_file *seq, void *v, loff_t *pos)
-	__must_hold(rcu)
 {
 	struct sock_map_seq_info *info = seq->private;
 
+	sock_map_seq_put_elem(info);
 	++*pos;
 	++info->index;
 
@@ -754,12 +763,12 @@ static void *sock_map_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 }
 
 static int sock_map_seq_show(struct seq_file *seq, void *v)
-	__must_hold(rcu)
 {
 	struct sock_map_seq_info *info = seq->private;
 	struct bpf_iter__sockmap ctx = {};
 	struct bpf_iter_meta meta;
 	struct bpf_prog *prog;
+	int ret;
 
 	meta.seq = seq;
 	prog = bpf_iter_get_info(&meta, !v);
@@ -773,17 +782,23 @@ static int sock_map_seq_show(struct seq_file *seq, void *v)
 		ctx.sk = info->sk;
 	}
 
-	return bpf_iter_run_prog(prog, &ctx);
+	if (ctx.sk)
+		lock_sock(ctx.sk);
+	ret = bpf_iter_run_prog(prog, &ctx);
+	if (ctx.sk)
+		release_sock(ctx.sk);
+
+	return ret;
 }
 
 static void sock_map_seq_stop(struct seq_file *seq, void *v)
-	__releases(rcu)
 {
+	struct sock_map_seq_info *info = seq->private;
+
 	if (!v)
 		(void)sock_map_seq_show(seq, NULL);
 
-	/* pairs with sock_map_seq_start */
-	rcu_read_unlock();
+	sock_map_seq_put_elem(info);
 }
 
 static const struct seq_operations sock_map_seq_ops = {
@@ -847,6 +862,7 @@ struct bpf_shtab_elem {
 	u32 hash;
 	struct sock *sk;
 	struct hlist_node node;
+	refcount_t ref;
 	u8 key[];
 };
 
@@ -906,11 +922,19 @@ static struct sock *__sock_hash_lookup_elem(struct bpf_map *map, void *key)
 	return elem ? elem->sk : NULL;
 }
 
-static void sock_hash_free_elem(struct bpf_shtab *htab,
-				struct bpf_shtab_elem *elem)
+static int sock_hash_hold_elem(struct bpf_shtab_elem *elem)
 {
-	atomic_dec(&htab->count);
-	kfree_rcu(elem, rcu);
+	refcount_inc(&elem->ref);
+	sock_hold(elem->sk);
+
+	return 0;
+}
+
+static void sock_hash_put_elem(struct bpf_shtab_elem *elem)
+{
+	sock_put(elem->sk);
+	if (refcount_dec_and_test(&elem->ref))
+		kfree_rcu(elem, rcu);
 }
 
 static void sock_hash_delete_from_link(struct bpf_map *map, struct sock *sk,
@@ -933,7 +957,8 @@ static void sock_hash_delete_from_link(struct bpf_map *map, struct sock *sk,
 	if (elem_probe && elem_probe == elem) {
 		hlist_del_rcu(&elem->node);
 		sock_map_unref(elem->sk, elem);
-		sock_hash_free_elem(htab, elem);
+		atomic_dec(&htab->count);
+		sock_hash_put_elem(elem);
 	}
 	spin_unlock_bh(&bucket->lock);
 }
@@ -954,7 +979,8 @@ static long sock_hash_delete_elem(struct bpf_map *map, void *key)
 	if (elem) {
 		hlist_del_rcu(&elem->node);
 		sock_map_unref(elem->sk, elem);
-		sock_hash_free_elem(htab, elem);
+		atomic_dec(&htab->count);
+		sock_hash_put_elem(elem);
 		ret = 0;
 	}
 	spin_unlock_bh(&bucket->lock);
@@ -985,6 +1011,7 @@ static struct bpf_shtab_elem *sock_hash_alloc_elem(struct bpf_shtab *htab,
 	memcpy(new->key, key, key_size);
 	new->sk = sk;
 	new->hash = hash;
+	refcount_set(&new->ref, 1);
 	return new;
 }
 
@@ -1041,7 +1068,8 @@ static int sock_hash_update_common(struct bpf_map *map, void *key,
 	if (elem) {
 		hlist_del_rcu(&elem->node);
 		sock_map_unref(elem->sk, elem);
-		sock_hash_free_elem(htab, elem);
+		atomic_dec(&htab->count);
+		sock_hash_put_elem(elem);
 	}
 	spin_unlock_bh(&bucket->lock);
 	return 0;
@@ -1182,7 +1210,8 @@ static void sock_hash_free(struct bpf_map *map)
 			rcu_read_unlock();
 			release_sock(elem->sk);
 			sock_put(elem->sk);
-			sock_hash_free_elem(htab, elem);
+			atomic_dec(&htab->count);
+			sock_hash_put_elem(elem);
 		}
 		cond_resched();
 	}
@@ -1307,14 +1336,22 @@ const struct bpf_func_proto bpf_msg_redirect_hash_proto = {
 	.arg4_type      = ARG_ANYTHING,
 };
 
+union sock_hash_seq_batch_item {
+	struct bpf_shtab_elem *elem;
+	__u64 cookie;
+};
+
 struct sock_hash_seq_info {
 	struct bpf_map *map;
 	struct bpf_shtab *htab;
 	u32 bucket_id;
+	unsigned int cur_elem;
+	unsigned int end_elem;
+	unsigned int max_elem;
+	union sock_hash_seq_batch_item *batch;
 };
 
-static void *sock_hash_seq_find_next(struct sock_hash_seq_info *info,
-				     struct bpf_shtab_elem *prev_elem)
+static void *sock_hash_seq_find_next(struct sock_hash_seq_info *info)
 {
 	const struct bpf_shtab *htab = info->htab;
 	struct bpf_shtab_bucket *bucket;
@@ -1322,57 +1359,233 @@ static void *sock_hash_seq_find_next(struct sock_hash_seq_info *info,
 	struct hlist_node *node;
 
 	/* try to find next elem in the same bucket */
-	if (prev_elem) {
-		node = rcu_dereference(hlist_next_rcu(&prev_elem->node));
-		elem = hlist_entry_safe(node, struct bpf_shtab_elem, node);
-		if (elem)
-			return elem;
-
-		/* no more elements, continue in the next bucket */
-		info->bucket_id++;
-	}
-
 	for (; info->bucket_id < htab->buckets_num; info->bucket_id++) {
 		bucket = &htab->buckets[info->bucket_id];
+		spin_lock_bh(&bucket->lock);
 		node = rcu_dereference(hlist_first_rcu(&bucket->head));
 		elem = hlist_entry_safe(node, struct bpf_shtab_elem, node);
 		if (elem)
 			return elem;
+		spin_unlock_bh(&bucket->lock);
 	}
 
 	return NULL;
 }
 
-static void *sock_hash_seq_start(struct seq_file *seq, loff_t *pos)
-	__acquires(rcu)
+static struct bpf_shtab_elem *sock_hash_seq_resume_bucket(struct bpf_shtab_elem *first_elem,
+							  union sock_hash_seq_batch_item *cookies,
+							  int n_cookies)
+{
+	struct bpf_shtab_elem *elem;
+	int i;
+
+	for (i = 0; i < n_cookies; i++) {
+		elem = first_elem;
+		hlist_for_each_entry_from_rcu(elem, node) {
+			if (cookies[i].cookie == atomic64_read(&elem->sk->sk_cookie))
+				return elem;
+		}
+	}
+
+	return NULL;
+}
+
+static struct bpf_shtab_elem *sock_hash_seq_resume(struct seq_file *seq)
 {
 	struct sock_hash_seq_info *info = seq->private;
+	unsigned int find_cookie = info->cur_elem;
+	unsigned int end_cookie = info->end_elem;
+	u32 resume_bucket = info->bucket_id;
+	struct bpf_shtab_bucket *bucket;
+	struct bpf_shtab_elem *elem;
 
-	if (*pos == 0)
-		++*pos;
+	if (end_cookie && find_cookie == end_cookie)
+		++info->bucket_id;
 
-	/* pairs with sock_hash_seq_stop */
-	rcu_read_lock();
-	return sock_hash_seq_find_next(info, NULL);
+	elem = sock_hash_seq_find_next(info);
+	info->cur_elem = 0;
+	info->end_elem = 0;
+
+	if (elem && info->bucket_id == resume_bucket && end_cookie) {
+		elem = sock_hash_seq_resume_bucket(elem,
+						   &info->batch[find_cookie],
+						   end_cookie - find_cookie);
+		if (!elem) {
+			bucket = &info->htab->buckets[info->bucket_id];
+			spin_unlock_bh(&bucket->lock);
+			++info->bucket_id;
+			elem = sock_hash_seq_find_next(info);
+		}
+	}
+
+	return elem;
+}
+
+static unsigned int sock_hash_seq_fill_batch(struct seq_file *seq,
+					     struct bpf_shtab_elem **start_elem)
+{
+	struct sock_hash_seq_info *info = seq->private;
+	struct bpf_shtab_elem *elem;
+	unsigned int expected = 1;
+	struct hlist_node *node;
+
+	sock_hash_hold_elem(*start_elem);
+	info->batch[info->end_elem++].elem = *start_elem;
+
+	node = rcu_dereference(hlist_next_rcu(&(*start_elem)->node));
+	elem = hlist_entry_safe(node, struct bpf_shtab_elem, node);
+	*start_elem = NULL;
+	hlist_for_each_entry_from_rcu(elem, node) {
+		if (info->end_elem < info->max_elem) {
+			sock_hash_hold_elem(elem);
+			info->batch[info->end_elem++].elem = elem;
+		} else if (!*start_elem) {
+			/* Remember where we left off. */
+			*start_elem = elem;
+		}
+		expected++;
+	}
+
+	return expected;
+}
+
+static void sock_hash_seq_put_batch(struct sock_hash_seq_info *info)
+{
+	unsigned int cur_elem = info->cur_elem;
+	union sock_hash_seq_batch_item *item;
+	__u64 cookie;
+
+	/* Remember the cookies of the sockets we haven't seen yet, so we can
+	 * pick up where we left off next time around.
+	 */
+	while (cur_elem < info->end_elem) {
+		item = &info->batch[cur_elem++];
+		cookie = sock_gen_cookie(item->elem->sk);
+		sock_hash_put_elem(item->elem);
+		item->cookie = cookie;
+	}
+}
+
+static int sock_hash_seq_realloc_batch(struct sock_hash_seq_info *info,
+				       unsigned int new_batch_sz, gfp_t flags)
+{
+	union sock_hash_seq_batch_item *new_batch;
+
+	new_batch = kvmalloc_array(new_batch_sz, sizeof(*new_batch),
+				   flags | __GFP_NOWARN);
+	if (!new_batch)
+		return -ENOMEM;
+
+	memcpy(new_batch, info->batch, sizeof(*info->batch) * info->end_elem);
+	kvfree(info->batch);
+	info->batch = new_batch;
+	info->max_elem = new_batch_sz;
+
+	return 0;
+}
+
+static struct bpf_shtab_elem *sock_hash_seq_batch(struct seq_file *seq)
+{
+	struct sock_hash_seq_info *info = seq->private;
+	struct bpf_shtab_bucket *bucket;
+	struct bpf_shtab_elem *elem;
+	unsigned int expected;
+	int err;
+
+	elem = sock_hash_seq_resume(seq);
+	if (!elem)
+		return NULL; /* Done */
+
+	expected = sock_hash_seq_fill_batch(seq, &elem);
+	if (likely(info->end_elem == expected))
+		goto done;
+
+	/* Batch size was too small. */
+	bucket = &info->htab->buckets[info->bucket_id];
+	spin_unlock_bh(&bucket->lock);
+	sock_hash_seq_put_batch(info);
+	err = sock_hash_seq_realloc_batch(info, expected * 3 / 2, GFP_USER);
+	if (err)
+		return ERR_PTR(err);
+
+	elem = sock_hash_seq_resume(seq);
+	if (!elem)
+		return NULL; /* Done */
+
+	expected = sock_hash_seq_fill_batch(seq, &elem);
+	if (likely(info->end_elem == expected))
+		goto done;
+
+	/* Batch size was still too small. Hold onto the lock while we try
+	 * again with a larger batch to make sure the current bucket's size
+	 * does not change in the meantime.
+	 */
+	err = sock_hash_seq_realloc_batch(info, expected, GFP_NOWAIT);
+	if (err) {
+		bucket = &info->htab->buckets[info->bucket_id];
+		spin_unlock_bh(&bucket->lock);
+		return ERR_PTR(err);
+	}
+
+	expected = sock_hash_seq_fill_batch(seq, &elem);
+	WARN_ON_ONCE(info->end_elem != expected);
+done:
+	bucket = &info->htab->buckets[info->bucket_id];
+	spin_unlock_bh(&bucket->lock);
+	return info->batch[0].elem;
+}
+
+static void *sock_hash_seq_start(struct seq_file *seq, loff_t *pos)
+{
+	void *ret = SEQ_START_TOKEN;
+
+	if (*pos) {
+		rcu_read_lock();
+		ret = sock_hash_seq_batch(seq);
+		rcu_read_unlock();
+	}
+
+	return ret;
 }
 
 static void *sock_hash_seq_next(struct seq_file *seq, void *v, loff_t *pos)
-	__must_hold(rcu)
 {
 	struct sock_hash_seq_info *info = seq->private;
+	struct bpf_shtab_elem *elem;
+
+	/* Whenever seq_next() is called, the iter->cur_sk is
+	 * done with seq_show(), so unref the iter->cur_sk.
+	 */
+	if (info->cur_elem < info->end_elem)
+		sock_hash_put_elem(info->batch[info->cur_elem++].elem);
+
+	/* After updating iter->cur_sk, check if there are more sockets
+	 * available in the current bucket batch.
+	 */
+	if (info->cur_elem < info->end_elem) {
+		elem = info->batch[info->cur_elem].elem;
+	} else {
+		/* Prepare a new batch. */
+		rcu_read_lock();
+		elem = sock_hash_seq_batch(seq);
+		rcu_read_unlock();
+	}
 
 	++*pos;
-	return sock_hash_seq_find_next(info, v);
+	return elem;
 }
 
 static int sock_hash_seq_show(struct seq_file *seq, void *v)
-	__must_hold(rcu)
 {
 	struct sock_hash_seq_info *info = seq->private;
 	struct bpf_iter__sockmap ctx = {};
 	struct bpf_shtab_elem *elem = v;
 	struct bpf_iter_meta meta;
 	struct bpf_prog *prog;
+	int ret;
+
+	if (v == SEQ_START_TOKEN)
+		return 0;
 
 	meta.seq = seq;
 	prog = bpf_iter_get_info(&meta, !elem);
@@ -1386,17 +1599,24 @@ static int sock_hash_seq_show(struct seq_file *seq, void *v)
 		ctx.sk = elem->sk;
 	}
 
-	return bpf_iter_run_prog(prog, &ctx);
+	if (elem)
+		lock_sock(elem->sk);
+	ret = bpf_iter_run_prog(prog, &ctx);
+	if (elem)
+		release_sock(elem->sk);
+
+	return ret;
 }
 
 static void sock_hash_seq_stop(struct seq_file *seq, void *v)
-	__releases(rcu)
 {
+	struct sock_hash_seq_info *info = seq->private;
+
 	if (!v)
 		(void)sock_hash_seq_show(seq, NULL);
 
-	/* pairs with sock_hash_seq_start */
-	rcu_read_unlock();
+	if (info->cur_elem < info->end_elem)
+		sock_hash_seq_put_batch(info);
 }
 
 static const struct seq_operations sock_hash_seq_ops = {
@@ -1406,6 +1626,8 @@ static const struct seq_operations sock_hash_seq_ops = {
 	.show	= sock_hash_seq_show,
 };
 
+#define INIT_BATCH_SZ 4
+
 static int sock_hash_init_seq_private(void *priv_data,
 				      struct bpf_iter_aux_info *aux)
 {
@@ -1414,7 +1636,7 @@ static int sock_hash_init_seq_private(void *priv_data,
 	bpf_map_inc_with_uref(aux->map);
 	info->map = aux->map;
 	info->htab = container_of(aux->map, struct bpf_shtab, map);
-	return 0;
+	return sock_hash_seq_realloc_batch(info, INIT_BATCH_SZ, GFP_USER);
 }
 
 static void sock_hash_fini_seq_private(void *priv_data)
@@ -1946,7 +2168,7 @@ static struct bpf_iter_reg sock_map_iter_reg = {
 		{ offsetof(struct bpf_iter__sockmap, key),
 		  PTR_TO_BUF | PTR_MAYBE_NULL | MEM_RDONLY },
 		{ offsetof(struct bpf_iter__sockmap, sk),
-		  PTR_TO_BTF_ID_OR_NULL },
+		  PTR_TO_BTF_ID_OR_NULL | PTR_TRUSTED },
 	},
 };
 
