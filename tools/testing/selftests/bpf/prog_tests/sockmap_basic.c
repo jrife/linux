@@ -290,7 +290,7 @@ static void test_sockmap_copy(enum bpf_map_type map_type)
 	__s64 *sock_fd = NULL;
 	struct bpf_link *link;
 	struct bpf_map *src;
-	char buf[64];
+	int v;
 
 	skel = bpf_iter_sockmap__open_and_load();
 	if (!ASSERT_OK_PTR(skel, "bpf_iter_sockmap__open_and_load"))
@@ -337,7 +337,7 @@ static void test_sockmap_copy(enum bpf_map_type map_type)
 		goto free_link;
 
 	/* do some tests */
-	while ((len = read(iter_fd, buf, sizeof(buf))) > 0)
+	while ((len = read(iter_fd, &v, sizeof(v))) > 0)
 		;
 	if (!ASSERT_GE(len, 0, "read"))
 		goto close_iter;
