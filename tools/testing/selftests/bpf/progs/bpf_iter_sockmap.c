@@ -37,7 +37,7 @@ int copy(struct bpf_iter__sockmap *ctx)
 {
 	struct sock *sk = ctx->sk;
 	__u32 tmp, *key = ctx->key;
-	int ret;
+	int ret = 0;
 
 	if (!key)
 		return 0;
@@ -48,6 +48,8 @@ int copy(struct bpf_iter__sockmap *ctx)
 	 * let us use the pointer from the context as an argument to the helper.
 	 */
 	tmp = *key;
+
+	bpf_seq_write(ctx->meta->seq, &ret, sizeof(ret));
 
 	if (sk) {
 		socks++;

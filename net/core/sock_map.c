@@ -866,7 +866,7 @@ struct bpf_shtab {
 
 static inline u32 sock_hash_bucket_hash(const void *key, u32 len)
 {
-	return jhash(key, len, 0);
+	return 0;
 }
 
 static struct bpf_shtab_bucket *sock_hash_select_bucket(struct bpf_shtab *htab,
