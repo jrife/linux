@@ -61,7 +61,6 @@ u32 jhash(const void *key, u32 length, u32 initval)
 	case 3:  a += (u32)k[2]<<16;
 	case 2:  a += (u32)k[1]<<8;
 	case 1:  a += k[0];
-		 c ^= a;
 		 __jhash_final(a, b, c);
 	case 0: /* Nothing left to add */
 		break;
