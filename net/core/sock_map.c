@@ -522,7 +522,8 @@ static bool sock_map_op_okay(const struct bpf_sock_ops_kern *ops)
 {
 	return ops->op == BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB ||
 	       ops->op == BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB ||
-	       ops->op == BPF_SOCK_OPS_TCP_LISTEN_CB;
+	       ops->op == BPF_SOCK_OPS_TCP_LISTEN_CB ||
+	       ops->op == BPF_SOCK_OPS_UDP_CONNECT_CB;
 }
 
 static bool sock_map_redirect_allowed(const struct sock *sk)
@@ -878,6 +879,7 @@ struct bpf_shtab {
 	u32 elem_size;
 	struct sk_psock_progs progs;
 	atomic_t count;
+	u32 hash_len;
 };
 
 static inline u32 sock_hash_bucket_hash(const void *key, u32 len)
@@ -885,10 +887,16 @@ static inline u32 sock_hash_bucket_hash(const void *key, u32 len)
 	return jhash(key, len, 0);
 }
 
+static inline u32 sock_hash_select_bucket_num(struct bpf_shtab *htab,
+					      u32 hash)
+{
+	return hash & (htab->buckets_num - 1);
+}
+
 static struct bpf_shtab_bucket *sock_hash_select_bucket(struct bpf_shtab *htab,
 							u32 hash)
 {
-	return &htab->buckets[hash & (htab->buckets_num - 1)];
+	return &htab->buckets[sock_hash_select_bucket_num(htab, hash)];
 }
 
 static struct bpf_shtab_elem *
@@ -909,14 +917,19 @@ sock_hash_lookup_elem_raw(struct hlist_head *head, u32 hash, void *key,
 static struct sock *__sock_hash_lookup_elem(struct bpf_map *map, void *key)
 {
 	struct bpf_shtab *htab = container_of(map, struct bpf_shtab, map);
-	u32 key_size = map->key_size, hash;
+	u32 key_size = map->key_size, bucket_hash, hash;
 	struct bpf_shtab_bucket *bucket;
 	struct bpf_shtab_elem *elem;
 
 	WARN_ON_ONCE(!rcu_read_lock_held());
 
-	hash = sock_hash_bucket_hash(key, key_size);
-	bucket = sock_hash_select_bucket(htab, hash);
+	bucket_hash = sock_hash_bucket_hash(key, htab->hash_len);
+	bucket = sock_hash_select_bucket(htab, bucket_hash);
+	if (htab->hash_len != map->key_size)
+		hash = sock_hash_bucket_hash(key, map->key_size);
+	else
+		hash = bucket_hash;
+
 	elem = sock_hash_lookup_elem_raw(&bucket->head, hash, key, key_size);
 
 	return elem ? elem->sk : NULL;
@@ -966,13 +979,17 @@ static void sock_hash_delete_from_link(struct bpf_map *map, struct sock *sk,
 static long sock_hash_delete_elem(struct bpf_map *map, void *key)
 {
 	struct bpf_shtab *htab = container_of(map, struct bpf_shtab, map);
-	u32 hash, key_size = map->key_size;
+	u32 bucket_hash, hash, key_size = map->key_size;
 	struct bpf_shtab_bucket *bucket;
 	struct bpf_shtab_elem *elem;
 	int ret = -ENOENT;
 
-	hash = sock_hash_bucket_hash(key, key_size);
-	bucket = sock_hash_select_bucket(htab, hash);
+	bucket_hash = sock_hash_bucket_hash(key, htab->hash_len);
+	bucket = sock_hash_select_bucket(htab, bucket_hash);
+	if (htab->hash_len != map->key_size)
+		hash = sock_hash_bucket_hash(key, map->key_size);
+	else
+		hash = bucket_hash;
 
 	spin_lock_bh(&bucket->lock);
 	elem = sock_hash_lookup_elem_raw(&bucket->head, hash, key, key_size);
@@ -1019,7 +1036,7 @@ static int sock_hash_update_common(struct bpf_map *map, void *key,
 				   struct sock *sk, u64 flags)
 {
 	struct bpf_shtab *htab = container_of(map, struct bpf_shtab, map);
-	u32 key_size = map->key_size, hash;
+	u32 key_size = map->key_size, bucket_hash, hash;
 	struct bpf_shtab_elem *elem, *elem_new;
 	struct bpf_shtab_bucket *bucket;
 	struct sk_psock_link *link;
@@ -1041,8 +1058,12 @@ static int sock_hash_update_common(struct bpf_map *map, void *key,
 	psock = sk_psock(sk);
 	WARN_ON_ONCE(!psock);
 
-	hash = sock_hash_bucket_hash(key, key_size);
-	bucket = sock_hash_select_bucket(htab, hash);
+	bucket_hash = sock_hash_bucket_hash(key, htab->hash_len);
+	bucket = sock_hash_select_bucket(htab, bucket_hash);
+	if (htab->hash_len != map->key_size)
+		hash = sock_hash_bucket_hash(key, map->key_size);
+	else
+		hash = bucket_hash;
 
 	spin_lock_bh(&bucket->lock);
 	elem = sock_hash_lookup_elem_raw(&bucket->head, hash, key, key_size);
@@ -1086,14 +1107,18 @@ static int sock_hash_get_next_key(struct bpf_map *map, void *key,
 {
 	struct bpf_shtab *htab = container_of(map, struct bpf_shtab, map);
 	struct bpf_shtab_elem *elem, *elem_next;
-	u32 hash, key_size = map->key_size;
+	u32 bucket_hash, hash, key_size = map->key_size;
 	struct hlist_head *head;
 	int i = 0;
 
 	if (!key)
 		goto find_first_elem;
-	hash = sock_hash_bucket_hash(key, key_size);
-	head = &sock_hash_select_bucket(htab, hash)->head;
+	bucket_hash = sock_hash_bucket_hash(key, htab->hash_len);
+	head = &sock_hash_select_bucket(htab, bucket_hash)->head;
+	if (htab->hash_len != map->key_size)
+		hash = sock_hash_bucket_hash(key, map->key_size);
+	else
+		hash = bucket_hash;
 	elem = sock_hash_lookup_elem_raw(head, hash, key, key_size);
 	if (!elem)
 		goto find_first_elem;
@@ -1130,7 +1155,11 @@ static struct bpf_map *sock_hash_alloc(union bpf_attr *attr)
 	    attr->key_size    == 0 ||
 	    (attr->value_size != sizeof(u32) &&
 	     attr->value_size != sizeof(u64)) ||
-	    attr->map_flags & ~SOCK_CREATE_FLAG_MASK)
+	    attr->map_flags & ~SOCK_CREATE_FLAG_MASK ||
+	    /* The lower 32 bits of map_extra specify the number of bits in
+	     * the key to hash.
+	     */
+	    attr->map_extra & ~0xFFFFFFFF)
 		return ERR_PTR(-EINVAL);
 	if (attr->key_size > MAX_BPF_STACK)
 		return ERR_PTR(-E2BIG);
@@ -1144,8 +1173,10 @@ static struct bpf_map *sock_hash_alloc(union bpf_attr *attr)
 	htab->buckets_num = roundup_pow_of_two(htab->map.max_entries);
 	htab->elem_size = sizeof(struct bpf_shtab_elem) +
 			  round_up(htab->map.key_size, 8);
+	htab->hash_len = attr->map_extra & 0xFFFFFFFF ?: attr->key_size;
 	if (htab->buckets_num == 0 ||
-	    htab->buckets_num > U32_MAX / sizeof(struct bpf_shtab_bucket)) {
+	    htab->buckets_num > U32_MAX / sizeof(struct bpf_shtab_bucket) ||
+	    htab->hash_len > attr->key_size) {
 		err = -EINVAL;
 		goto free_htab;
 	}
@@ -1344,6 +1375,8 @@ union sock_hash_seq_batch_item {
 struct sock_hash_seq_info {
 	struct bpf_map *map;
 	struct bpf_shtab *htab;
+	void *key_prefix;
+	u32 key_prefix_len;
 	u32 bucket_id;
 	unsigned int cur_elem;
 	unsigned int end_elem;
@@ -1356,17 +1389,22 @@ static void *sock_hash_seq_find_next(struct sock_hash_seq_info *info)
 	const struct bpf_shtab *htab = info->htab;
 	struct bpf_shtab_bucket *bucket;
 	struct bpf_shtab_elem *elem;
-	struct hlist_node *node;
 
 	/* try to find next elem in the same bucket */
 	for (; info->bucket_id < htab->buckets_num; info->bucket_id++) {
 		bucket = &htab->buckets[info->bucket_id];
 		spin_lock_bh(&bucket->lock);
-		node = rcu_dereference(hlist_first_rcu(&bucket->head));
-		elem = hlist_entry_safe(node, struct bpf_shtab_elem, node);
-		if (elem)
-			return elem;
+		hlist_for_each_entry_rcu(elem, &bucket->head, node)
+			if (!info->key_prefix ||
+			    !memcmp(&elem->key, info->key_prefix,
+				    info->key_prefix_len))
+				return elem;
 		spin_unlock_bh(&bucket->lock);
+		/* Don't explore other buckets when using the key_prefix
+		 * filter.
+		 */
+		if (info->key_prefix)
+			break;
 	}
 
 	return NULL;
@@ -1399,7 +1437,7 @@ static struct bpf_shtab_elem *sock_hash_seq_resume(struct seq_file *seq)
 	struct bpf_shtab_bucket *bucket;
 	struct bpf_shtab_elem *elem;
 
-	if (end_cookie && find_cookie == end_cookie)
+	if (end_cookie && find_cookie == end_cookie && !info->key_prefix)
 		++info->bucket_id;
 
 	elem = sock_hash_seq_find_next(info);
@@ -1410,7 +1448,7 @@ static struct bpf_shtab_elem *sock_hash_seq_resume(struct seq_file *seq)
 		elem = sock_hash_seq_resume_bucket(elem,
 						   &info->batch[find_cookie],
 						   end_cookie - find_cookie);
-		if (!elem) {
+		if (!elem && !info->key_prefix) {
 			bucket = &info->htab->buckets[info->bucket_id];
 			spin_unlock_bh(&bucket->lock);
 			++info->bucket_id;
@@ -1436,6 +1474,9 @@ static unsigned int sock_hash_seq_fill_batch(struct seq_file *seq,
 	elem = hlist_entry_safe(node, struct bpf_shtab_elem, node);
 	*start_elem = NULL;
 	hlist_for_each_entry_from_rcu(elem, node) {
+		if (info->key_prefix &&
+		    memcmp(&elem->key, info->key_prefix, info->key_prefix_len))
+			continue;
 		if (info->end_elem < info->max_elem) {
 			sock_hash_hold_elem(elem);
 			info->batch[info->end_elem++].elem = elem;
@@ -1632,10 +1673,18 @@ static int sock_hash_init_seq_private(void *priv_data,
 				      struct bpf_iter_aux_info *aux)
 {
 	struct sock_hash_seq_info *info = priv_data;
+	u32 hash;
 
 	bpf_map_inc_with_uref(aux->map);
 	info->map = aux->map;
 	info->htab = container_of(aux->map, struct bpf_shtab, map);
+	info->key_prefix = aux->sockhash.key_prefix;
+	info->key_prefix_len = aux->sockhash.key_prefix_len;
+	if (info->key_prefix) {
+		hash = sock_hash_bucket_hash(info->key_prefix,
+					    info->key_prefix_len);
+		info->bucket_id = sock_hash_select_bucket_num(info->htab, hash);
+	}
 	return sock_hash_seq_realloc_batch(info, INIT_BATCH_SZ, GFP_USER);
 }
 
@@ -2125,8 +2174,12 @@ static int sock_map_iter_attach_target(struct bpf_prog *prog,
 				       union bpf_iter_link_info *linfo,
 				       struct bpf_iter_aux_info *aux)
 {
+	void __user *ukey_prefix;
+	struct bpf_shtab *htab;
 	struct bpf_map *map;
+	u32 key_prefix_len;
 	int err = -EINVAL;
+	void *key_prefix;
 
 	if (!linfo->map.map_fd)
 		return -EBADF;
@@ -2138,6 +2191,27 @@ static int sock_map_iter_attach_target(struct bpf_prog *prog,
 	if (map->map_type != BPF_MAP_TYPE_SOCKMAP &&
 	    map->map_type != BPF_MAP_TYPE_SOCKHASH)
 		goto put_map;
+
+	if (map->map_type == BPF_MAP_TYPE_SOCKHASH) {
+		ukey_prefix = u64_to_user_ptr(linfo->sock_hash.key_prefix);
+		key_prefix_len = linfo->sock_hash.key_prefix_len;
+		htab = container_of(aux->map, struct bpf_shtab, map);
+
+		if (ukey_prefix) {
+			if (key_prefix_len != htab->hash_len)
+				goto put_map;
+			key_prefix = vmemdup_user(ukey_prefix, key_prefix_len);
+			if (IS_ERR(key_prefix)) {
+				err = PTR_ERR(key_prefix);
+				goto put_map;
+			}
+		} else if (linfo->sock_hash.key_prefix_len) {
+			goto put_map;
+		}
+
+		aux->sockhash.key_prefix_len = key_prefix_len;
+		aux->sockhash.key_prefix = key_prefix;
+	}
 
 	if (prog->aux->max_rdonly_access > map->key_size) {
 		err = -EACCES;
@@ -2155,6 +2229,8 @@ put_map:
 static void sock_map_iter_detach_target(struct bpf_iter_aux_info *aux)
 {
 	bpf_map_put_with_uref(aux->map);
+	if (aux->sockhash.key_prefix)
+		kvfree(aux->sockhash.key_prefix);
 }
 
 static struct bpf_iter_reg sock_map_iter_reg = {

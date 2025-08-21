@@ -142,6 +142,11 @@ union bpf_iter_link_info {
 		__u32	pid;
 		__u32	pid_fd;
 	} task;
+	/* Parameters for socket hash iterators. */
+	struct {
+		__aligned_u64	key_prefix;	/* key prefix filter */
+		__u32		key_prefix_len; /* key_prefix length */
+	} sock_hash;
 };
 
 /* BPF syscall commands, see bpf(2) man-page for more details. */
@@ -7114,6 +7119,9 @@ enum {
 					 * is triggered. It's used to correlate
 					 * sendmsg timestamp with corresponding
 					 * tskey.
+					 */
+	BPF_SOCK_OPS_UDP_CONNECT_CB,	/* Calls BPF program right before an
+					 * active connection is initialized
 					 */
 };
 

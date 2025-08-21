@@ -5576,6 +5576,12 @@ static bool is_locked_tcp_sock_ops(struct bpf_sock_ops_kern *bpf_sock)
 	return bpf_sock->op <= BPF_SOCK_OPS_WRITE_HDR_OPT_CB;
 }
 
+static bool is_locked_sock_ops(struct bpf_sock_ops_kern *bpf_sock)
+{
+	return is_locked_tcp_sock_ops(bpf_sock) ||
+	       bpf_sock->op == BPF_SOCK_OPS_UDP_CONNECT_CB;
+}
+
 static int _bpf_setsockopt(struct sock *sk, int level, int optname,
 			   char *optval, int optlen)
 {
@@ -5726,7 +5732,7 @@ static const struct bpf_func_proto bpf_sock_addr_getsockopt_proto = {
 BPF_CALL_5(bpf_sock_ops_setsockopt, struct bpf_sock_ops_kern *, bpf_sock,
 	   int, level, int, optname, char *, optval, int, optlen)
 {
-	if (!is_locked_tcp_sock_ops(bpf_sock))
+	if (!is_locked_sock_ops(bpf_sock))
 		return -EOPNOTSUPP;
 
 	return _bpf_setsockopt(bpf_sock->sk, level, optname, optval, optlen);
@@ -5814,7 +5820,7 @@ static int bpf_sock_ops_get_syn(struct bpf_sock_ops_kern *bpf_sock,
 BPF_CALL_5(bpf_sock_ops_getsockopt, struct bpf_sock_ops_kern *, bpf_sock,
 	   int, level, int, optname, char *, optval, int, optlen)
 {
-	if (!is_locked_tcp_sock_ops(bpf_sock))
+	if (!is_locked_sock_ops(bpf_sock))
 		return -EOPNOTSUPP;
 
 	if (IS_ENABLED(CONFIG_INET) && level == SOL_TCP &&
