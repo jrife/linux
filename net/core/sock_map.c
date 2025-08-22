@@ -847,6 +847,7 @@ struct bpf_shtab_elem {
 	u32 hash;
 	struct sock *sk;
 	struct hlist_node node;
+	refcount_t ref;
 	u8 key[];
 };
 
@@ -906,11 +907,18 @@ static struct sock *__sock_hash_lookup_elem(struct bpf_map *map, void *key)
 	return elem ? elem->sk : NULL;
 }
 
-static void sock_hash_free_elem(struct bpf_shtab *htab,
-				struct bpf_shtab_elem *elem)
+static void sock_hash_put_elem(struct bpf_shtab *htab,
+			       struct bpf_shtab_elem *elem)
 {
-	atomic_dec(&htab->count);
-	kfree_rcu(elem, rcu);
+	if (htab)
+		atomic_dec(&htab->count);
+	if (refcount_dec_and_test(&elem->ref))
+		kfree_rcu(elem, rcu);
+}
+
+static void sock_hash_hold_elem(struct bpf_shtab_elem *elem)
+{
+	refcount_inc(&elem->ref);
 }
 
 static void sock_hash_delete_from_link(struct bpf_map *map, struct sock *sk,
@@ -933,7 +941,7 @@ static void sock_hash_delete_from_link(struct bpf_map *map, struct sock *sk,
 	if (elem_probe && elem_probe == elem) {
 		hlist_del_rcu(&elem->node);
 		sock_map_unref(elem->sk, elem);
-		sock_hash_free_elem(htab, elem);
+		sock_hash_put_elem(htab, elem);
 	}
 	spin_unlock_bh(&bucket->lock);
 }
@@ -954,7 +962,7 @@ static long sock_hash_delete_elem(struct bpf_map *map, void *key)
 	if (elem) {
 		hlist_del_rcu(&elem->node);
 		sock_map_unref(elem->sk, elem);
-		sock_hash_free_elem(htab, elem);
+		sock_hash_put_elem(htab, elem);
 		ret = 0;
 	}
 	spin_unlock_bh(&bucket->lock);
@@ -985,6 +993,7 @@ static struct bpf_shtab_elem *sock_hash_alloc_elem(struct bpf_shtab *htab,
 	memcpy(new->key, key, key_size);
 	new->sk = sk;
 	new->hash = hash;
+	refcount_set(&new->ref, 1);
 	return new;
 }
 
@@ -1041,7 +1050,7 @@ static int sock_hash_update_common(struct bpf_map *map, void *key,
 	if (elem) {
 		hlist_del_rcu(&elem->node);
 		sock_map_unref(elem->sk, elem);
-		sock_hash_free_elem(htab, elem);
+		sock_hash_put_elem(htab, elem);
 	}
 	spin_unlock_bh(&bucket->lock);
 	return 0;
@@ -1182,7 +1191,7 @@ static void sock_hash_free(struct bpf_map *map)
 			rcu_read_unlock();
 			release_sock(elem->sk);
 			sock_put(elem->sk);
-			sock_hash_free_elem(htab, elem);
+			sock_hash_put_elem(htab, elem);
 		}
 		cond_resched();
 	}
