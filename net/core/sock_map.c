@@ -889,10 +889,16 @@ static inline void sock_hash_elem_hash(const void *key, u32 *bucket_hash,
 	*hash = hash_len == key_size ? *bucket_hash : jhash(key, key_size, 0);
 }
 
+static inline u32 sock_hash_select_bucket_num(struct bpf_shtab *htab,
+					      u32 hash)
+{
+	return hash & (htab->buckets_num - 1);
+}
+
 static struct bpf_shtab_bucket *sock_hash_select_bucket(struct bpf_shtab *htab,
 							u32 hash)
 {
-	return &htab->buckets[hash & (htab->buckets_num - 1)];
+	return &htab->buckets[sock_hash_select_bucket_num(htab, hash)];
 }
 
 static struct bpf_shtab_elem *
@@ -1356,6 +1362,8 @@ union sock_hash_seq_batch_item {
 struct sock_hash_seq_info {
 	struct bpf_map *map;
 	struct bpf_shtab *htab;
+	void *key_prefix;
+	u32 key_prefix_len;
 	u32 bucket_id;
 	unsigned int cur_elem;
 	unsigned int end_elem;
@@ -1368,16 +1376,21 @@ static void *sock_hash_seq_find_next(struct sock_hash_seq_info *info)
 	const struct bpf_shtab *htab = info->htab;
 	struct bpf_shtab_bucket *bucket;
 	struct bpf_shtab_elem *elem;
-	struct hlist_node *node;
 
 	for (; info->bucket_id < htab->buckets_num; info->bucket_id++) {
 		bucket = &htab->buckets[info->bucket_id];
 		spin_lock_bh(&bucket->lock);
-		node = rcu_dereference(hlist_first_rcu(&bucket->head));
-		elem = hlist_entry_safe(node, struct bpf_shtab_elem, node);
-		if (elem)
-			return elem;
+		hlist_for_each_entry_rcu(elem, &bucket->head, node)
+			if (!info->key_prefix ||
+			    !memcmp(&elem->key, info->key_prefix,
+				    info->key_prefix_len))
+				return elem;
 		spin_unlock_bh(&bucket->lock);
+		/* Don't explore other buckets when using the key_prefix
+		 * filter.
+		 */
+		if (info->key_prefix)
+			break;
 	}
 
 	return NULL;
@@ -1409,8 +1422,11 @@ static struct bpf_shtab_elem *sock_hash_seq_resume(struct seq_file *seq)
 	u32 resume_bucket = info->bucket_id;
 	struct bpf_shtab_elem *elem;
 
-	if (end_cookie && find_cookie == end_cookie)
+	if (end_cookie && find_cookie == end_cookie) {
+		if (info->key_prefix)
+			return NULL;
 		++info->bucket_id;
+	}
 
 	elem = sock_hash_seq_find_next(info);
 	info->cur_elem = 0;
@@ -1422,8 +1438,10 @@ static struct bpf_shtab_elem *sock_hash_seq_resume(struct seq_file *seq)
 						   end_cookie - find_cookie);
 		if (!elem) {
 			spin_unlock_bh(&info->htab->buckets[info->bucket_id].lock);
-			++info->bucket_id;
-			elem = sock_hash_seq_find_next(info);
+			if (!info->key_prefix) {
+				++info->bucket_id;
+				elem = sock_hash_seq_find_next(info);
+			}
 		}
 	}
 
@@ -1444,6 +1462,9 @@ static unsigned int sock_hash_seq_fill_batch(struct seq_file *seq,
 	elem = hlist_entry_safe(rcu_dereference(hlist_next_rcu(&start_elem->node)),
 				struct bpf_shtab_elem, node);
 	hlist_for_each_entry_from_rcu(elem, node) {
+		if (info->key_prefix &&
+		    memcmp(&elem->key, info->key_prefix, info->key_prefix_len))
+			continue;
 		if (info->end_elem < info->max_elem) {
 			sock_hash_hold_elem(elem);
 			sock_hold(elem->sk);
@@ -1647,10 +1668,18 @@ static int sock_hash_init_seq_private(void *priv_data,
 				      struct bpf_iter_aux_info *aux)
 {
 	struct sock_hash_seq_info *info = priv_data;
+	u32 hash;
 
 	bpf_map_inc_with_uref(aux->map);
 	info->map = aux->map;
 	info->htab = container_of(aux->map, struct bpf_shtab, map);
+	info->key_prefix = aux->sockhash.key_prefix;
+	info->key_prefix_len = aux->sockhash.key_prefix_len;
+	if (info->key_prefix) {
+		sock_hash_elem_hash(info->key_prefix, &hash, &hash,
+				    info->key_prefix_len, info->key_prefix_len);
+		info->bucket_id = sock_hash_select_bucket_num(info->htab, hash);
+	}
 	return sock_hash_seq_realloc_batch(info, INIT_BATCH_SZ, GFP_USER);
 }
 
@@ -2140,8 +2169,12 @@ static int sock_map_iter_attach_target(struct bpf_prog *prog,
 				       union bpf_iter_link_info *linfo,
 				       struct bpf_iter_aux_info *aux)
 {
+	void __user *ukey_prefix;
+	struct bpf_shtab *htab;
 	struct bpf_map *map;
+	u32 key_prefix_len;
 	int err = -EINVAL;
+	void *key_prefix;
 
 	if (!linfo->map.map_fd)
 		return -EBADF;
@@ -2153,6 +2186,27 @@ static int sock_map_iter_attach_target(struct bpf_prog *prog,
 	if (map->map_type != BPF_MAP_TYPE_SOCKMAP &&
 	    map->map_type != BPF_MAP_TYPE_SOCKHASH)
 		goto put_map;
+
+	if (map->map_type == BPF_MAP_TYPE_SOCKHASH) {
+		ukey_prefix = u64_to_user_ptr(linfo->map.sock_hash.key_prefix);
+		key_prefix_len = linfo->map.sock_hash.key_prefix_len;
+		htab = container_of(map, struct bpf_shtab, map);
+
+		if (ukey_prefix) {
+			if (key_prefix_len != htab->hash_len)
+				goto put_map;
+			key_prefix = vmemdup_user(ukey_prefix, key_prefix_len);
+			if (IS_ERR(key_prefix)) {
+				err = PTR_ERR(key_prefix);
+				goto put_map;
+			}
+		} else if (linfo->map.sock_hash.key_prefix_len) {
+			goto put_map;
+		}
+
+		aux->sockhash.key_prefix_len = key_prefix_len;
+		aux->sockhash.key_prefix = key_prefix;
+	}
 
 	if (prog->aux->max_rdonly_access > map->key_size) {
 		err = -EACCES;
@@ -2170,6 +2224,8 @@ put_map:
 static void sock_map_iter_detach_target(struct bpf_iter_aux_info *aux)
 {
 	bpf_map_put_with_uref(aux->map);
+	if (aux->sockhash.key_prefix)
+		kvfree(aux->sockhash.key_prefix);
 }
 
 static struct bpf_iter_reg sock_map_iter_reg = {
