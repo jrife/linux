@@ -1329,23 +1329,41 @@ const struct bpf_func_proto bpf_msg_redirect_hash_proto = {
 struct sock_hash_seq_info {
 	struct bpf_map *map;
 	struct bpf_shtab *htab;
+	struct bpf_shtab_elem *next_elem;
 	u32 bucket_id;
 };
+
+static inline bool bpf_shtab_elem_unhashed(struct bpf_shtab_elem *elem)
+{
+	return READ_ONCE(elem->node.pprev) == LIST_POISON2;
+}
 
 static void *sock_hash_seq_find_next(struct sock_hash_seq_info *info,
 				     struct bpf_shtab_elem *prev_elem)
 {
 	const struct bpf_shtab *htab = info->htab;
+	struct bpf_shtab_elem *elem = NULL;
 	struct bpf_shtab_bucket *bucket;
-	struct bpf_shtab_elem *elem;
 	struct hlist_node *node;
 
+	rcu_read_lock();
 	/* try to find next elem in the same bucket */
 	if (prev_elem) {
-		node = rcu_dereference(hlist_next_rcu(&prev_elem->node));
-		elem = hlist_entry_safe(node, struct bpf_shtab_elem, node);
+		bucket = &htab->buckets[info->bucket_id];
+		spin_lock_bh(&bucket->lock);
+		elem = prev_elem;
+		hlist_for_each_entry_continue_rcu(elem, node) {
+			if (!bpf_shtab_elem_unhashed(elem)) {
+				sock_hash_hold_elem(elem);
+				sock_hold(elem->sk);
+				break;
+			}
+		}
+		sock_put(prev_elem->sk);
+		sock_hash_put_elem(prev_elem);
+		spin_unlock_bh(&bucket->lock);
 		if (elem)
-			return elem;
+			goto out;
 
 		/* no more elements, continue in the next bucket */
 		info->bucket_id++;
@@ -1353,30 +1371,38 @@ static void *sock_hash_seq_find_next(struct sock_hash_seq_info *info,
 
 	for (; info->bucket_id < htab->buckets_num; info->bucket_id++) {
 		bucket = &htab->buckets[info->bucket_id];
+		spin_lock_bh(&bucket->lock);
 		node = rcu_dereference(hlist_first_rcu(&bucket->head));
 		elem = hlist_entry_safe(node, struct bpf_shtab_elem, node);
+		if (elem) {
+			sock_hash_hold_elem(elem);
+			sock_hold(elem->sk);
+		}
+		spin_unlock_bh(&bucket->lock);
 		if (elem)
-			return elem;
+			goto out;
 	}
-
-	return NULL;
+out:
+	rcu_read_unlock();
+	return elem;
 }
 
 static void *sock_hash_seq_start(struct seq_file *seq, loff_t *pos)
-	__acquires(rcu)
 {
 	struct sock_hash_seq_info *info = seq->private;
 
 	if (*pos == 0)
 		++*pos;
 
-	/* pairs with sock_hash_seq_stop */
-	rcu_read_lock();
+	if (info->next_elem) {
+		if (!bpf_shtab_elem_unhashed(info->next_elem))
+			return info->next_elem;
+		return sock_hash_seq_find_next(info, info->next_elem);
+	}
 	return sock_hash_seq_find_next(info, NULL);
 }
 
 static void *sock_hash_seq_next(struct seq_file *seq, void *v, loff_t *pos)
-	__must_hold(rcu)
 {
 	struct sock_hash_seq_info *info = seq->private;
 
@@ -1385,13 +1411,13 @@ static void *sock_hash_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 }
 
 static int sock_hash_seq_show(struct seq_file *seq, void *v)
-	__must_hold(rcu)
 {
 	struct sock_hash_seq_info *info = seq->private;
 	struct bpf_iter__sockmap ctx = {};
 	struct bpf_shtab_elem *elem = v;
 	struct bpf_iter_meta meta;
 	struct bpf_prog *prog;
+	int ret;
 
 	meta.seq = seq;
 	prog = bpf_iter_get_info(&meta, !elem);
@@ -1405,17 +1431,21 @@ static int sock_hash_seq_show(struct seq_file *seq, void *v)
 		ctx.sk = elem->sk;
 	}
 
-	return bpf_iter_run_prog(prog, &ctx);
+	if (elem)
+		lock_sock(elem->sk);
+	ret = bpf_iter_run_prog(prog, &ctx);
+	if (elem)
+		release_sock(elem->sk);
+	return ret;
 }
 
 static void sock_hash_seq_stop(struct seq_file *seq, void *v)
-	__releases(rcu)
 {
+	struct sock_hash_seq_info *info = seq->private;
+
 	if (!v)
 		(void)sock_hash_seq_show(seq, NULL);
-
-	/* pairs with sock_hash_seq_start */
-	rcu_read_unlock();
+	info->next_elem = v;
 }
 
 static const struct seq_operations sock_hash_seq_ops = {
@@ -1440,6 +1470,10 @@ static void sock_hash_fini_seq_private(void *priv_data)
 {
 	struct sock_hash_seq_info *info = priv_data;
 
+	if (info->next_elem) {
+		sock_put(info->next_elem->sk);
+		sock_hash_put_elem(info->next_elem);
+	}
 	bpf_map_put_with_uref(info->map);
 }
 
