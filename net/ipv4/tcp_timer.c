@@ -285,9 +285,10 @@ static int tcp_write_timeout(struct sock *sk)
 	mptcp_active_detect_blackhole(sk, expired);
 
 	if (BPF_SOCK_OPS_TEST_FLAG(tp, BPF_SOCK_OPS_RTO_CB_FLAG))
-		tcp_call_bpf_3arg(sk, BPF_SOCK_OPS_RTO_CB,
-				  icsk->icsk_retransmits,
-				  icsk->icsk_rto, (int)expired);
+		expired |= tcp_call_bpf_3arg(sk, BPF_SOCK_OPS_RTO_CB,
+					     icsk->icsk_retransmits,
+					     icsk->icsk_rto,
+					     (int)expired) == -ETIMEDOUT;
 
 	if (expired) {
 		/* Has it gone just too far? */
