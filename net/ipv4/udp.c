@@ -385,16 +385,18 @@ static int compute_score(struct sock *sk, const struct net *net,
 	score = (sk->sk_family == PF_INET) ? 2 : 1;
 
 	inet = inet_sk(sk);
-	if (sk->sk_state == TCP_ESTABLISHED) {
+	if (inet->inet_daddr) {
 		if (inet->inet_daddr != saddr)
 			return -1;
 		score += 4;
-		if (likely(inet->inet_dport)) {
-			if (inet->inet_dport != sport)
-				return -1;
-			score += 4;
-		}
 	}
+
+	if (inet->inet_dport) {
+		if (inet->inet_dport != sport)
+			return -1;
+		score += 4;
+	}
+
 	dev_match = udp_sk_bound_dev_eq(net, sk->sk_bound_dev_if,
 					dif, sdif);
 	if (!dev_match)
@@ -405,6 +407,14 @@ static int compute_score(struct sock *sk, const struct net *net,
 	if (READ_ONCE(sk->sk_incoming_cpu) == raw_smp_processor_id())
 		score++;
 	return score;
+}
+
+static inline int adjust_score(struct sock *sk, int score)
+{
+	if (inet_sk(sk)->inet_dport)
+		score -= 4;
+
+	return score - 4;
 }
 
 u32 udp_ehashfn(const struct net *net, const __be32 laddr, const __u16 lport,
@@ -480,6 +490,11 @@ rescore:
 		score = compute_score(need_rescore ? result : sk, net, saddr,
 				      sport, daddr, hnum, dif, sdif);
 		if (score > badness) {
+			if (unlikely(inet_sk(sk)->inet_daddr &&
+				     sk->sk_state == TCP_CLOSE))
+				if (adjust_score(sk, score) <= badness)
+					continue;
+
 			badness = score;
 
 			if (need_rescore)
