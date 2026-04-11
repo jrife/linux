@@ -368,7 +368,7 @@ int udp_v4_get_port(struct sock *sk, unsigned short snum)
 static int compute_score(struct sock *sk, const struct net *net,
 			 __be32 saddr, __be16 sport,
 			 __be32 daddr, unsigned short hnum,
-			 int dif, int sdif)
+			 int dif, int sdif, int dscore)
 {
 	int score;
 	struct inet_sock *inet;
@@ -388,13 +388,13 @@ static int compute_score(struct sock *sk, const struct net *net,
 	if (inet->inet_daddr) {
 		if (inet->inet_daddr != saddr)
 			return -1;
-		score += 4;
+		score += dscore;
 	}
 
 	if (inet->inet_dport) {
 		if (inet->inet_dport != sport)
 			return -1;
-		score += 4;
+		score += dscore;
 	}
 
 	dev_match = udp_sk_bound_dev_eq(net, sk->sk_bound_dev_if,
@@ -407,14 +407,6 @@ static int compute_score(struct sock *sk, const struct net *net,
 	if (READ_ONCE(sk->sk_incoming_cpu) == raw_smp_processor_id())
 		score++;
 	return score;
-}
-
-static inline int adjust_score(struct sock *sk, int score)
-{
-	if (inet_sk(sk)->inet_dport)
-		score -= 4;
-
-	return score - 4;
 }
 
 u32 udp_ehashfn(const struct net *net, const __be32 laddr, const __u16 lport,
@@ -460,7 +452,8 @@ static struct sock *udp4_lib_lookup1(const struct net *net,
 
 	sk_for_each_rcu(sk, &hslot->head) {
 		score = compute_score(sk, net,
-				      saddr, sport, daddr, hnum, dif, sdif);
+				      saddr, sport, daddr, hnum, dif, sdif,
+				      sk->sk_state == TCP_CLOSE ? 0 : 4);
 		if (score > badness) {
 			result = sk;
 			badness = score;
@@ -488,13 +481,9 @@ static struct sock *udp4_lib_lookup2(const struct net *net,
 		need_rescore = false;
 rescore:
 		score = compute_score(need_rescore ? result : sk, net, saddr,
-				      sport, daddr, hnum, dif, sdif);
+				      sport, daddr, hnum, dif, sdif,
+				      sk->sk_state == TCP_CLOSE ? 0 : 4);
 		if (score > badness) {
-			if (unlikely(inet_sk(sk)->inet_daddr &&
-				     sk->sk_state == TCP_CLOSE))
-				if (adjust_score(sk, score) <= badness)
-					continue;
-
 			badness = score;
 
 			if (need_rescore)
