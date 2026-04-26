@@ -1,0 +1,33 @@
+OBJECTS THAT BELONG TO NETWORK NAMESPACES
+=========================================
+
+* Sockets
+* Interfaces
+* Routing tables
+* Conntrack tables
+* Netfilter tables
+
+Which of these use shared hashes where filtering
+is necessary?
+
+
+METHODS FOR EFFICIENT SOCKET ITERATION
+======================================
+
+* SOCK_HASH
+* SOCK_STORAGE
+  * Won't work out of the box without a few adjustments I think
+    * Mark sk as PTR_TRUSTED.
+    * Need to acquire socket lock before running iterator program.
+    * Iterator looks like it's flaky (skips / repeats ?)
+    * Also holds RCU lock between start/stop which is incompatible with lock
+    * Same infinite looping bug exists here.
+* Allow for socket iterators to see things in every namespace.
+    * What if per-namespace hashes are used?
+    * Still, we could visit each exactly once I think if we combined with
+      net ns iteration?
+* Generic maps or data structure using arena + bpf_sock_destroy in test prog
+* Net namespace iteration in BPF?
+
+OPEN CODED ITERATORS?
+=====================
