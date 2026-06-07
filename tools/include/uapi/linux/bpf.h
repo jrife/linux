@@ -6331,9 +6331,10 @@ enum {
 /* Flags for bpf_redirect and bpf_redirect_map helpers */
 enum {
 	BPF_F_INGRESS		= (1ULL << 0), /* used for skb path */
+	BPF_F_EGRESS		= (1ULL << 1), /* used for skb path */
 	BPF_F_BROADCAST		= (1ULL << 3), /* used for XDP path */
 	BPF_F_EXCLUDE_INGRESS	= (1ULL << 4), /* used for XDP path */
-#define BPF_F_REDIRECT_FLAGS (BPF_F_INGRESS | BPF_F_BROADCAST | BPF_F_EXCLUDE_INGRESS)
+#define BPF_F_REDIRECT_FLAGS (BPF_F_INGRESS | BPF_F_EGRESS | BPF_F_BROADCAST | BPF_F_EXCLUDE_INGRESS)
 };
 
 #define __bpf_md_ptr(type, name)	\
